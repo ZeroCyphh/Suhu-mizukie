@@ -3,7 +3,7 @@ import random
 import logging
 import time
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 from enum import Enum
 
@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 # ========== TIME & ACTIVITY SYSTEM ==========
 def get_ist_time():
     """Get current time in Indian Standard Time (UTC+5:30)"""
-    utc_now = datetime.utcnow()
+    utc_now = datetime.now(timezone.utc)  # Fixed: using timezone-aware datetime
     ist_now = utc_now + timedelta(hours=5, minutes=30)
     return ist_now
 
@@ -100,7 +100,7 @@ class MoodSystem:
     def __init__(self):
         self.current_mood = Mood.CHILL
         self.mood_intensity = 0.5
-        self.last_mood_change = datetime.now()
+        self.last_mood_change = datetime.now(timezone.utc)
         self.mood_duration = timedelta(minutes=random.randint(45, 120))
         self.last_message_time = {}
         self.conversation_topics = {}
@@ -109,7 +109,7 @@ class MoodSystem:
         
     def update_mood_based_on_context(self, message: Message, sender_id: int):
         """Update mood based on context and conversation patterns"""
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         text = message.text or message.caption or ""
         msg_lower = text.lower()
         
@@ -211,6 +211,40 @@ class MoodSystem:
         }
         return mood_descriptions.get(self.current_mood, "Feeling normal.")
     
+    def get_typing_delay(self, message_length: int) -> float:
+        """Get realistic typing delay based on mood and message length"""
+        # Base delay based on message length
+        base_delay = 0.5 + (message_length * 0.03)
+        
+        # Mood adjustments
+        mood_delays = {
+            Mood.CHILL: random.uniform(0.8, 1.5),
+            Mood.PLAYFUL: random.uniform(0.7, 1.3),
+            Mood.SARCASTIC: random.uniform(0.6, 1.2),
+            Mood.BUSY: random.uniform(0.3, 0.8),
+            Mood.TIRED: random.uniform(1.2, 2.5),
+            Mood.HAPPY: random.uniform(0.9, 1.8),
+            Mood.ANNOYED: random.uniform(0.4, 1.0),
+            Mood.FLIRTY: random.uniform(1.0, 2.0),
+            Mood.CURIOUS: random.uniform(0.8, 1.6),
+            Mood.NOSTALGIC: random.uniform(1.5, 3.0),
+            Mood.STUDY_MODE: random.uniform(0.5, 1.2),
+            Mood.HANGOUT_MODE: random.uniform(0.7, 1.4),
+            Mood.JEALOUS: random.uniform(0.6, 1.4),
+            Mood.AFFECTIONATE: random.uniform(1.0, 2.0),
+            Mood.EVENING_MOOD: random.uniform(0.7, 1.5),
+            Mood.CARING: random.uniform(0.8, 1.6)
+        }
+        
+        mood_multiplier = mood_delays.get(self.current_mood, 1.0)
+        final_delay = base_delay * mood_multiplier
+        
+        # Sometimes take longer (like a real person checking phone)
+        if random.random() < 0.2:
+            final_delay += random.uniform(2, 8)
+            
+        return min(final_delay, 10.0)  # Max 10 seconds delay
+    
     def should_send_meal_reminder(self, meal_type: str) -> bool:
         """Check if we should send a meal reminder"""
         now = get_ist_time()
@@ -235,12 +269,12 @@ mood_system = MoodSystem()
 # ========== CONVERSATION MEMORY ==========
 conversation_memory: Dict[int, List[Dict]] = {}
 bot_status = {
-    "start_time": datetime.now(),
+    "start_time": datetime.now(timezone.utc),
     "total_messages": 0,
     "boyfriend_messages": 0,
-    "last_seen": datetime.now(),
+    "last_seen": datetime.now(timezone.utc),
     "online": True,
-    "last_activity_check": datetime.now()
+    "last_activity_check": datetime.now(timezone.utc)
 }
 
 # ========== REALISTIC RESPONSE SHORTCUTS ==========
@@ -467,7 +501,7 @@ async def generate_ai_response(message: Message, is_boyfriend: bool) -> str:
         bot_status["total_messages"] += 1
         if is_boyfriend:
             bot_status["boyfriend_messages"] += 1
-        bot_status["last_seen"] = datetime.now()
+        bot_status["last_seen"] = datetime.now(timezone.utc)
         
         return response
         
@@ -769,12 +803,6 @@ async def send_meal_reminders(app: Client):
                     await app.send_message(BOYFRIEND_ID, message)
                     logger.info(f"📤 Sent breakfast reminder to boyfriend")
                     mood_system.mark_meal_reminder_sent("breakfast")
-                    
-                    # Also send in groups sometimes
-                    if random.random() < 0.3:
-                        # Find groups where boyfriend is
-                        # For now, we'll just log
-                        logger.info("Would have sent breakfast reminder in group")
                 except Exception as e:
                     logger.error(f"Failed to send breakfast reminder: {e}")
         
@@ -808,7 +836,7 @@ async def evening_activity_boost(app: Client):
     try:
         if is_evening_time() and random.random() < 0.4:  # 40% chance
             # Don't spam if we just messaged
-            now = datetime.now()
+            now = datetime.now(timezone.utc)
             if now - bot_status["last_activity_check"] > timedelta(minutes=15):
                 message = random.choice(EVENING_CONVERSATION_STARTERS)
                 try:
@@ -860,7 +888,7 @@ async def handle_commands(app: Client, message: Message):
     # Only boyfriend can use admin commands
     if is_boyfriend and text.startswith("/"):
         if text.startswith("/status"):
-            uptime = datetime.now() - bot_status["start_time"]
+            uptime = datetime.now(timezone.utc) - bot_status["start_time"]
             hours = uptime.total_seconds() // 3600
             minutes = (uptime.total_seconds() % 3600) // 60
             
@@ -967,28 +995,15 @@ async def main():
         asyncio.create_task(scheduler_task(app))
         logger.info("⏰ Scheduler task started")
         
-        # Send online notification to boyfriend
-        try:
-            current_time = get_ist_time().strftime('%I:%M %p')
-            current_mood = mood_system.current_mood.value
-            
-            await app.send_message(
-                BOYFRIEND_ID,
-                f"Hey {BOYFRIEND_NAME}! I'm online now. 😊\n"
-                f"Time: {current_time} IST\n"
-                f"Mood: {current_mood}\n"
-                f"Call me {BOYFRIEND_NICKNAME} like always 💕\n"
-                f"I'll remind you about meals and chat more in evenings! 🌙\n"
-                f"Running on Railway 🚄"
-            )
-            logger.info("📤 Startup message sent to boyfriend")
-        except Exception as e:
-            logger.warning(f"⚠️ Couldn't send startup message: {e}")
+        # Note: Won't send startup message due to peer_id_invalid error
+        # This usually means the bot hasn't interacted with boyfriend yet
+        # It will work once boyfriend messages first
         
         logger.info("🎯 Suhani is now active and listening...")
         logger.info("💕 Personality: Real Indian girlfriend mode activated")
         logger.info("🍲 Will check meals at: Breakfast(8-9), Lunch(1-2), Dinner(8-9)")
         logger.info("🌙 Evening boost active: 8 PM to 12 AM IST")
+        logger.info("⚠️ Note: Send me a message first in Telegram to establish connection")
         
         # Keep the bot running
         idle_count = 0
