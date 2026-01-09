@@ -2,6 +2,7 @@ import asyncio
 import random
 import logging
 import time
+import json
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from enum import Enum
@@ -9,7 +10,7 @@ from enum import Enum
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from pyrogram.enums import ChatAction, ParseMode
-from openai import OpenAI
+import aiohttp
 
 # ========== HARDCODED CONFIGURATION ==========
 API_ID = 25130255
@@ -23,6 +24,7 @@ BOYFRIEND_USERNAME = "@staticpirate"
 # AI Configuration
 NVIDIA_API_KEY = "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"
 AI_MODEL = "deepseek-ai/deepseek-v3.1-terminus"
+AI_BASE_URL = "https://integrate.api.nvidia.com/v1"
 
 # Bot personality configuration
 USER_REAL_NAME = "Suhani Thakur"
@@ -35,12 +37,6 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
-
-# ========== AI CLIENT ==========
-client_ai = OpenAI(
-    base_url="https://integrate.api.nvidia.com/v1",
-    api_key=NVIDIA_API_KEY
-)
 
 # ========== MOOD SYSTEM ==========
 class Mood(Enum):
@@ -237,7 +233,124 @@ SYSTEM_PROMPT = f"""You are Suhani Thakur (also called Mizuki or Mizu), a 21-yea
 - Don't overshare
 """
 
-# ========== HELPER FUNCTIONS ==========
+# ========== AI HELPER FUNCTIONS ==========
+async def generate_ai_response(message: Message, is_boyfriend: bool) -> str:
+    """Generate response using NVIDIA AI API directly"""
+    try:
+        text = message.text or message.caption or ""
+        user_id = message.from_user.id if message.from_user else message.chat.id
+        username = message.from_user.first_name if message.from_user else "Someone"
+        
+        # Update mood based on context
+        mood_system.update_mood_based_on_context(text, user_id)
+        current_mood = mood_system.current_mood
+        
+        # Prepare conversation history
+        history = conversation_memory.get(user_id, [])
+        
+        # Build context
+        time_of_day = datetime.now().strftime("%I:%M %p")
+        mood_context = mood_system.get_mood_texture()
+        
+        # Special context for boyfriend
+        if is_boyfriend:
+            user_context = f"This is my boyfriend. Be natural - sometimes teasing, sometimes normal. Current mood: {current_mood.value}. Texting at {time_of_day}. Keep it real, not overly lovey-dovey."
+        else:
+            user_context = f"This is a friend/acquaintance. Be friendly but casual. Current mood: {current_mood.value}."
+        
+        # Prepare messages for AI
+        messages = [
+            {"role": "system", "content": f"{SYSTEM_PROMPT}\n\nCONTEXT: {mood_context}\nTime: {time_of_day}\nDevice: Phone\n{user_context}"},
+            *history[-4:],  # Last 4 exchanges
+            {"role": "user", "content": f"{username}: {text}"}
+        ]
+        
+        # Call NVIDIA AI API directly
+        headers = {
+            "Authorization": f"Bearer {NVIDIA_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": AI_MODEL,
+            "messages": messages,
+            "temperature": 0.2,
+            "top_p": 0.7,
+            "max_tokens": 150,
+            "stream": True
+        }
+        
+        # Make async HTTP request
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{AI_BASE_URL}/chat/completions",
+                headers=headers,
+                json=payload
+            ) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    logger.error(f"AI API Error {response.status}: {error_text}")
+                    raise Exception(f"AI API Error: {response.status}")
+                
+                # Read streaming response
+                response_content = ""
+                async for line in response.content:
+                    if line:
+                        line_text = line.decode('utf-8').strip()
+                        if line_text.startswith("data: "):
+                            data_str = line_text[6:]  # Remove "data: " prefix
+                            if data_str == "[DONE]":
+                                break
+                            try:
+                                data = json.loads(data_str)
+                                if "choices" in data and data["choices"]:
+                                    delta = data["choices"][0].get("delta", {})
+                                    if "content" in delta and delta["content"]:
+                                        response_content += delta["content"]
+                            except json.JSONDecodeError:
+                                continue
+        
+        response = response_content.strip()
+        
+        # Clean up response - remove any AI mentions
+        response = response.replace("As an AI", "Hmm").replace("as an AI", "").replace("I am an AI", "I am")
+        
+        # Store in memory
+        conversation_memory.setdefault(user_id, []).extend([
+            {"role": "user", "content": text[:80]},
+            {"role": "assistant", "content": response[:80]}
+        ])
+        
+        # Keep memory limited
+        if len(conversation_memory[user_id]) > 6:
+            conversation_memory[user_id] = conversation_memory[user_id][-6:]
+        
+        # Update stats
+        bot_status["total_messages"] += 1
+        if is_boyfriend:
+            bot_status["boyfriend_messages"] += 1
+        bot_status["last_seen"] = datetime.now()
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"AI Error: {e}")
+        # Fallback responses based on mood
+        current_mood = mood_system.current_mood
+        
+        if is_boyfriend:
+            if current_mood == Mood.FLIRTY:
+                return random.choice(["Miss you", "You're sweet", "Aww", "Ha thik hai"])
+            elif current_mood == Mood.SARCASTIC:
+                return random.choice(["Chal na", "Kya yaar", "Haha", "Obviously"])
+            elif current_mood == Mood.BUSY:
+                return random.choice(["Busy hu", "Baad mein", "Abhi nahi"])
+            else:
+                return random.choice(["Hmm", "Achha", "Okay", "Tell me"])
+        else:
+            return random.choice(["Hmm okay", "Achha", "Nice", "Okay"])
+
+# ========== MESSAGE HANDLING FUNCTIONS ==========
 def should_respond(message: Message, is_boyfriend: bool) -> bool:
     """Determine if we should respond to this message"""
     if not message.text and not message.caption:
@@ -282,102 +395,6 @@ def should_respond(message: Message, is_boyfriend: bool) -> bool:
         return random.random() < 0.6  # 60% chance
     
     return False
-
-async def generate_ai_response(
-    message: Message,
-    is_boyfriend: bool
-) -> str:
-    """Generate response using AI with streaming and thinking"""
-    try:
-        text = message.text or message.caption or ""
-        user_id = message.from_user.id if message.from_user else message.chat.id
-        username = message.from_user.first_name if message.from_user else "Someone"
-        
-        # Update mood based on context
-        mood_system.update_mood_based_on_context(text, user_id)
-        current_mood = mood_system.current_mood
-        
-        # Prepare conversation history
-        history = conversation_memory.get(user_id, [])
-        
-        # Build context
-        time_of_day = datetime.now().strftime("%I:%M %p")
-        mood_context = mood_system.get_mood_texture()
-        
-        # Special context for boyfriend
-        if is_boyfriend:
-            user_context = f"This is my boyfriend. Be natural - sometimes teasing, sometimes normal. Current mood: {current_mood.value}. Texting at {time_of_day}. Keep it real, not overly lovey-dovey."
-        else:
-            user_context = f"This is a friend/acquaintance. Be friendly but casual. Current mood: {current_mood.value}."
-        
-        # Prepare messages for AI
-        messages = [
-            {"role": "system", "content": f"{SYSTEM_PROMPT}\n\nCONTEXT: {mood_context}\nTime: {time_of_day}\nDevice: Phone\n{user_context}"},
-            *history[-4:],  # Last 4 exchanges
-            {"role": "user", "content": f"{username}: {text}"}
-        ]
-        
-        # Use your base API structure with streaming and thinking
-        completion = client_ai.chat.completions.create(
-            model=AI_MODEL,
-            messages=messages,
-            temperature=0.2,  # Lower temperature for more consistent responses
-            top_p=0.7,
-            max_tokens=150,  # Keep responses short
-            extra_body={"chat_template_kwargs": {"thinking": True}},
-            stream=True
-        )
-        
-        # Collect response from stream
-        response_content = ""
-        
-        for chunk in completion:
-            # Get reasoning content (for internal logging if needed)
-            reasoning = getattr(chunk.choices[0].delta, "reasoning_content", None)
-            
-            # Get the actual response content
-            if chunk.choices[0].delta.content is not None:
-                response_content += chunk.choices[0].delta.content
-        
-        response = response_content.strip()
-        
-        # Clean up response - remove any AI mentions
-        response = response.replace("As an AI", "Hmm").replace("as an AI", "").replace("I am an AI", "I am")
-        
-        # Store in memory
-        conversation_memory.setdefault(user_id, []).extend([
-            {"role": "user", "content": text[:80]},
-            {"role": "assistant", "content": response[:80]}
-        ])
-        
-        # Keep memory limited
-        if len(conversation_memory[user_id]) > 6:
-            conversation_memory[user_id] = conversation_memory[user_id][-6:]
-        
-        # Update stats
-        bot_status["total_messages"] += 1
-        if is_boyfriend:
-            bot_status["boyfriend_messages"] += 1
-        bot_status["last_seen"] = datetime.now()
-        
-        return response
-        
-    except Exception as e:
-        logger.error(f"AI Error: {e}")
-        # Fallback responses based on mood
-        current_mood = mood_system.current_mood
-        
-        if is_boyfriend:
-            if current_mood == Mood.FLIRTY:
-                return random.choice(["Miss you", "You're sweet", "Aww", "Ha thik hai"])
-            elif current_mood == Mood.SARCASTIC:
-                return random.choice(["Chal na", "Kya yaar", "Haha", "Obviously"])
-            elif current_mood == Mood.BUSY:
-                return random.choice(["Busy hu", "Baad mein", "Abhi nahi"])
-            else:
-                return random.choice(["Hmm", "Achha", "Okay", "Tell me"])
-        else:
-            return random.choice(["Hmm okay", "Achha", "Nice", "Okay"])
 
 async def handle_message(app: Client, message: Message):
     """Handle incoming messages"""
@@ -530,7 +547,7 @@ async def handle_commands(app: Client, message: Message):
 # ========== MAIN APPLICATION ==========
 async def main():
     """Main function to run the user bot"""
-    logger.info("🚀 Starting Mizuki User Bot with Streaming AI...")
+    logger.info("🚀 Starting Mizuki User Bot with NVIDIA AI API...")
     logger.info(f"🤖 Using AI Model: {AI_MODEL}")
     
     # Create Pyrogram client
@@ -593,7 +610,7 @@ async def main():
         
         logger.info("🎯 Mizuki is now active and listening...")
         logger.info(f"💑 Boyfriend: {BOYFRIEND_ID} ({BOYFRIEND_USERNAME})")
-        logger.info("🤖 AI with streaming and thinking enabled")
+        logger.info("🤖 AI streaming enabled")
         
         # Keep the bot running
         idle_count = 0
