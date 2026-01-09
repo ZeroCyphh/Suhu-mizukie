@@ -234,8 +234,44 @@ SYSTEM_PROMPT = f"""You are Suhani Thakur (also called Mizuki or Mizu), a 21-yea
 """
 
 # ========== AI HELPER FUNCTIONS ==========
+async def call_nvidia_api(messages: list) -> str:
+    """Call NVIDIA AI API directly"""
+    try:
+        headers = {
+            "Authorization": f"Bearer {NVIDIA_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": AI_MODEL,
+            "messages": messages,
+            "temperature": 0.2,
+            "top_p": 0.7,
+            "max_tokens": 150,
+            "stream": False  # Simplified for now
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{AI_BASE_URL}/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=30
+            ) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    logger.error(f"AI API Error {response.status}: {error_text}")
+                    return ""
+                
+                data = await response.json()
+                return data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+                
+    except Exception as e:
+        logger.error(f"NVIDIA API call failed: {e}")
+        return ""
+
 async def generate_ai_response(message: Message, is_boyfriend: bool) -> str:
-    """Generate response using NVIDIA AI API directly"""
+    """Generate response using NVIDIA AI API"""
     try:
         text = message.text or message.caption or ""
         user_id = message.from_user.id if message.from_user else message.chat.id
@@ -265,52 +301,12 @@ async def generate_ai_response(message: Message, is_boyfriend: bool) -> str:
             {"role": "user", "content": f"{username}: {text}"}
         ]
         
-        # Call NVIDIA AI API directly
-        headers = {
-            "Authorization": f"Bearer {NVIDIA_API_KEY}",
-            "Content-Type": "application/json"
-        }
+        # Call NVIDIA AI API
+        response = await call_nvidia_api(messages)
         
-        payload = {
-            "model": AI_MODEL,
-            "messages": messages,
-            "temperature": 0.2,
-            "top_p": 0.7,
-            "max_tokens": 150,
-            "stream": True
-        }
-        
-        # Make async HTTP request
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{AI_BASE_URL}/chat/completions",
-                headers=headers,
-                json=payload
-            ) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    logger.error(f"AI API Error {response.status}: {error_text}")
-                    raise Exception(f"AI API Error: {response.status}")
-                
-                # Read streaming response
-                response_content = ""
-                async for line in response.content:
-                    if line:
-                        line_text = line.decode('utf-8').strip()
-                        if line_text.startswith("data: "):
-                            data_str = line_text[6:]  # Remove "data: " prefix
-                            if data_str == "[DONE]":
-                                break
-                            try:
-                                data = json.loads(data_str)
-                                if "choices" in data and data["choices"]:
-                                    delta = data["choices"][0].get("delta", {})
-                                    if "content" in delta and delta["content"]:
-                                        response_content += delta["content"]
-                            except json.JSONDecodeError:
-                                continue
-        
-        response = response_content.strip()
+        if not response:
+            # Fallback to quick responses
+            return await get_fallback_response(is_boyfriend)
         
         # Clean up response - remove any AI mentions
         response = response.replace("As an AI", "Hmm").replace("as an AI", "").replace("I am an AI", "I am")
@@ -334,21 +330,24 @@ async def generate_ai_response(message: Message, is_boyfriend: bool) -> str:
         return response
         
     except Exception as e:
-        logger.error(f"AI Error: {e}")
-        # Fallback responses based on mood
-        current_mood = mood_system.current_mood
-        
-        if is_boyfriend:
-            if current_mood == Mood.FLIRTY:
-                return random.choice(["Miss you", "You're sweet", "Aww", "Ha thik hai"])
-            elif current_mood == Mood.SARCASTIC:
-                return random.choice(["Chal na", "Kya yaar", "Haha", "Obviously"])
-            elif current_mood == Mood.BUSY:
-                return random.choice(["Busy hu", "Baad mein", "Abhi nahi"])
-            else:
-                return random.choice(["Hmm", "Achha", "Okay", "Tell me"])
+        logger.error(f"AI Response Generation Error: {e}")
+        return await get_fallback_response(is_boyfriend)
+
+async def get_fallback_response(is_boyfriend: bool) -> str:
+    """Get fallback response when AI fails"""
+    current_mood = mood_system.current_mood
+    
+    if is_boyfriend:
+        if current_mood == Mood.FLIRTY:
+            return random.choice(["Miss you", "You're sweet", "Aww", "Ha thik hai"])
+        elif current_mood == Mood.SARCASTIC:
+            return random.choice(["Chal na", "Kya yaar", "Haha", "Obviously"])
+        elif current_mood == Mood.BUSY:
+            return random.choice(["Busy hu", "Baad mein", "Abhi nahi"])
         else:
-            return random.choice(["Hmm okay", "Achha", "Nice", "Okay"])
+            return random.choice(["Hmm", "Achha", "Okay", "Tell me"])
+    else:
+        return random.choice(["Hmm okay", "Achha", "Nice", "Okay"])
 
 # ========== MESSAGE HANDLING FUNCTIONS ==========
 def should_respond(message: Message, is_boyfriend: bool) -> bool:
@@ -442,7 +441,7 @@ async def handle_message(app: Client, message: Message):
             else:
                 response = random.choice(QUICK_RESPONSES["acknowledge"])
         else:
-            # Generate AI response with streaming
+            # Generate AI response
             response = await generate_ai_response(message, is_boyfriend)
         
         if not response:
@@ -536,18 +535,11 @@ async def handle_commands(app: Client, message: Message):
                 conversation_memory[user_id] = []
                 await message.reply("Memory cleared! 👍")
             return
-            
-        elif text.startswith("/testai"):
-            test_msg = "Hello, how are you today?"
-            await message.reply(f"Testing AI with: '{test_msg}'...")
-            response = await generate_ai_response(message, is_boyfriend=True)
-            await message.reply(f"AI Response: {response}")
-            return
 
 # ========== MAIN APPLICATION ==========
 async def main():
     """Main function to run the user bot"""
-    logger.info("🚀 Starting Mizuki User Bot with NVIDIA AI API...")
+    logger.info("🚀 Starting Mizuki User Bot...")
     logger.info(f"🤖 Using AI Model: {AI_MODEL}")
     
     # Create Pyrogram client
@@ -575,7 +567,7 @@ async def main():
             await message.reply(
                 "Hey! I'm online now. 😊\n"
                 "Just text me normally!\n\n"
-                "Commands: /status /mood /help /testai\n"
+                "Commands: /status /mood /help\n"
                 f"AI: {AI_MODEL}"
             )
         else:
@@ -610,7 +602,6 @@ async def main():
         
         logger.info("🎯 Mizuki is now active and listening...")
         logger.info(f"💑 Boyfriend: {BOYFRIEND_ID} ({BOYFRIEND_USERNAME})")
-        logger.info("🤖 AI streaming enabled")
         
         # Keep the bot running
         idle_count = 0
@@ -621,17 +612,6 @@ async def main():
             # Log idle status every 6 hours
             if idle_count % 6 == 0:
                 logger.info(f"💤 Still running... Uptime: {idle_count} hours")
-                
-            # Occasionally update boyfriend if online long
-            if idle_count % 12 == 0 and bot_status["boyfriend_messages"] == 0:
-                try:
-                    await app.send_message(
-                        BOYFRIEND_ID,
-                        "Online but quiet... 😴\n"
-                        f"Messages processed: {bot_status['total_messages']}"
-                    )
-                except:
-                    pass
             
     except Exception as e:
         logger.error(f"❌ Failed to start client: {e}")
