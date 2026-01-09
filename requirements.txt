@@ -1,3 +1,5 @@
 pyrogram==2.0.106
-openai==1.12.0
+openai==0.28.1
 tgcrypto==1.2.5
+httpx==0.24.1
+aiohttp==3.9.3
