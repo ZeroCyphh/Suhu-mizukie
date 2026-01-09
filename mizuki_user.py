@@ -14,14 +14,15 @@ from openai import OpenAI
 # ========== HARDCODED CONFIGURATION ==========
 API_ID = 25130255
 API_HASH = "35dab1cb42d44c19f4"
-STRING_SESSION = "BQF_dQ8AXsJZ6A32aIHZuSQpwZygbxOhvQ_1gq_eywNt-fEDJ0T1tq8ppV6kK9-T2bkFn5ygv153pmYAq7gmvOr21CODkyCvsSxUAsciuSfhmTWxuyKYXtGIIKlhD8gXwCkUx3s_PvlAuX42GHEf9s6hL_EDdQLSi_IfwjGXpOdC9M09bYmn5Rwgw6thdyzi8zViCubNTupFkjLkKOoX4jU_rIltFKUNLByPMuD5OQ0JRBPNKcCMvvN4lY7dn1uNnfsMJUk5-EZ7Fz9M3OT28ld83Gf2EK8AJulCuimVQ90NIinyh8mvVdR4HBzyclDDytb1VzQ_AapT_62_zsqlfKJEYwgj4wAAAAH-2rHGAA"
+STRING_SESSION = "BQF_dQ8AXsJZ6A32aIHZuSQpwZygbxOhvQ_1gq_eywNt-fEDJ0T1tq8ppV6kK9-T2bkFn5ygv153pmYAq7gmvOr21CODkyCvsSxUAsciuSfhmTWxuyKYXtGIIKlhD8gXwCkUx3s_PvlAuX42GHEf9s6hL_EDdQLSi_IfwjGXpOdC9M09bYmn5Rwgw6thdyzi8zViCubNTupFkjLkKOoX4jU_rIltFKUNLByPMuD5OQ0JRBPNKcCMvvN4lY7dn1uNnfsMJUk5-EZ7Fz9M3OT28ld83Gf2EK8AJulCuimVQ90NIinyh8mvVdR4HBzyclDDytb1VzQ_AapT_62_zsqlfKJEYwgj4wAAAAH-2rGMAA"
 
 # User account info
 BOYFRIEND_ID = 7892115854
 BOYFRIEND_USERNAME = "@staticpirate"
 
-# NVIDIA AI API
+# AI Configuration
 NVIDIA_API_KEY = "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"
+AI_MODEL = "deepseek-ai/deepseek-v3.1-terminus"
 
 # Bot personality configuration
 USER_REAL_NAME = "Suhani Thakur"
@@ -35,7 +36,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ========== AI CONFIGURATION ==========
+# ========== AI CLIENT ==========
 client_ai = OpenAI(
     base_url="https://integrate.api.nvidia.com/v1",
     api_key=NVIDIA_API_KEY
@@ -286,7 +287,7 @@ async def generate_ai_response(
     message: Message,
     is_boyfriend: bool
 ) -> str:
-    """Generate response using AI with realistic personality"""
+    """Generate response using AI with streaming and thinking"""
     try:
         text = message.text or message.caption or ""
         user_id = message.from_user.id if message.from_user else message.chat.id
@@ -311,24 +312,34 @@ async def generate_ai_response(
         
         # Prepare messages for AI
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "system", "content": f"CONTEXT: {mood_context}\nTime: {time_of_day}\nDevice: Phone\n{user_context}"},
+            {"role": "system", "content": f"{SYSTEM_PROMPT}\n\nCONTEXT: {mood_context}\nTime: {time_of_day}\nDevice: Phone\n{user_context}"},
             *history[-4:],  # Last 4 exchanges
             {"role": "user", "content": f"{username}: {text}"}
         ]
         
-        # Call AI
+        # Use your base API structure with streaming and thinking
         completion = client_ai.chat.completions.create(
-            model="deepseek-ai/deepseek-v3.1-terminus",
+            model=AI_MODEL,
             messages=messages,
-            temperature=0.85,
-            top_p=0.9,
-            max_tokens=100,
-            frequency_penalty=0.3,
-            presence_penalty=0.2
+            temperature=0.2,  # Lower temperature for more consistent responses
+            top_p=0.7,
+            max_tokens=150,  # Keep responses short
+            extra_body={"chat_template_kwargs": {"thinking": True}},
+            stream=True
         )
         
-        response = completion.choices[0].message.content.strip()
+        # Collect response from stream
+        response_content = ""
+        
+        for chunk in completion:
+            # Get reasoning content (for internal logging if needed)
+            reasoning = getattr(chunk.choices[0].delta, "reasoning_content", None)
+            
+            # Get the actual response content
+            if chunk.choices[0].delta.content is not None:
+                response_content += chunk.choices[0].delta.content
+        
+        response = response_content.strip()
         
         # Clean up response - remove any AI mentions
         response = response.replace("As an AI", "Hmm").replace("as an AI", "").replace("I am an AI", "I am")
@@ -414,7 +425,7 @@ async def handle_message(app: Client, message: Message):
             else:
                 response = random.choice(QUICK_RESPONSES["acknowledge"])
         else:
-            # Generate AI response
+            # Generate AI response with streaming
             response = await generate_ai_response(message, is_boyfriend)
         
         if not response:
@@ -480,7 +491,8 @@ async def handle_commands(app: Client, message: Message):
                 f"• Your msgs: {bot_status['boyfriend_messages']}\n"
                 f"• Mood: {mood_system.current_mood.value}\n"
                 f"• Last seen: {bot_status['last_seen'].strftime('%I:%M %p')}\n"
-                f"• Memory: {len(conversation_memory)} chats"
+                f"• Memory: {len(conversation_memory)} chats\n"
+                f"• AI Model: {AI_MODEL}"
             )
             await message.reply(status_msg)
             return
@@ -507,11 +519,19 @@ async def handle_commands(app: Client, message: Message):
                 conversation_memory[user_id] = []
                 await message.reply("Memory cleared! 👍")
             return
+            
+        elif text.startswith("/testai"):
+            test_msg = "Hello, how are you today?"
+            await message.reply(f"Testing AI with: '{test_msg}'...")
+            response = await generate_ai_response(message, is_boyfriend=True)
+            await message.reply(f"AI Response: {response}")
+            return
 
 # ========== MAIN APPLICATION ==========
 async def main():
     """Main function to run the user bot"""
-    logger.info("🚀 Starting Mizuki User Bot (Hardcoded Version)...")
+    logger.info("🚀 Starting Mizuki User Bot with Streaming AI...")
+    logger.info(f"🤖 Using AI Model: {AI_MODEL}")
     
     # Create Pyrogram client
     app = Client(
@@ -538,7 +558,8 @@ async def main():
             await message.reply(
                 "Hey! I'm online now. 😊\n"
                 "Just text me normally!\n\n"
-                "Commands: /status /mood /help"
+                "Commands: /status /mood /help /testai\n"
+                f"AI: {AI_MODEL}"
             )
         else:
             await message.reply("Hi there! 👋")
@@ -563,6 +584,7 @@ async def main():
                 f"Hey! Just got online. 😊\n"
                 f"Time: {current_time}\n"
                 f"Mood: {current_mood}\n"
+                f"AI: {AI_MODEL}\n"
                 f"Running on Railway 🚄"
             )
             logger.info("📤 Startup message sent to boyfriend")
@@ -571,7 +593,7 @@ async def main():
         
         logger.info("🎯 Mizuki is now active and listening...")
         logger.info(f"💑 Boyfriend: {BOYFRIEND_ID} ({BOYFRIEND_USERNAME})")
-        logger.info("🕐 Mood system initialized")
+        logger.info("🤖 AI with streaming and thinking enabled")
         
         # Keep the bot running
         idle_count = 0
@@ -589,7 +611,7 @@ async def main():
                     await app.send_message(
                         BOYFRIEND_ID,
                         "Online but quiet... 😴\n"
-                        "Everything working fine!"
+                        f"Messages processed: {bot_status['total_messages']}"
                     )
                 except:
                     pass
