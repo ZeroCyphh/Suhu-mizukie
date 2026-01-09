@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 # ========== TIME & ACTIVITY SYSTEM ==========
 def get_ist_time():
     """Get current time in Indian Standard Time (UTC+5:30)"""
-    utc_now = datetime.now(timezone.utc)  # Fixed: using timezone-aware datetime
+    utc_now = datetime.now(timezone.utc)
     ist_now = utc_now + timedelta(hours=5, minutes=30)
     return ist_now
 
@@ -567,17 +567,6 @@ def should_respond(message: Message, is_boyfriend: bool) -> bool:
                     is_mentioned = True
                     break
     
-    # Always respond to boyfriend (but not always immediately)
-    if is_boyfriend:
-        # Sometimes take time to reply or ignore briefly
-        if random.random() < 0.10:  # 10% chance to ignore temporarily
-            return False
-        return True
-    
-    # For others
-    if is_mentioned:
-        return True
-    
     # Check if it's a direct question to us
     text_lower = text.lower()
     if any(word in text_lower for word in ["mizuki", "mizu", "suhani", "bhabhi", "suhu"]):
@@ -587,28 +576,38 @@ def should_respond(message: Message, is_boyfriend: bool) -> bool:
     if "boyfriend" in text_lower or "bf" in text_lower or "staticpirate" in text_lower or "kosmic" in text_lower:
         return True
     
-    # Evening boost: more active in responses
-    response_probability = 0.15  # Base for groups
-    if mood_system.evening_boost_active:
-        response_probability = 0.35  # Higher in evening
+    # Always respond to boyfriend in private chat
+    if is_boyfriend and message.chat.type == "private":
+        # Sometimes take time to reply or ignore briefly
+        if random.random() < 0.15:  # 15% chance to ignore temporarily
+            return False
+        return True
     
-    # Random responses in groups
+    # Different response rates for groups vs private
     if message.chat.type in ["group", "supergroup"]:
-        # Randomly join conversations
+        # In groups, respond less to boyfriend (30% chance)
+        if is_boyfriend:
+            return random.random() < 0.30
+        
+        # Evening boost: more active in responses
+        response_probability = 0.20  # Base for groups
+        if mood_system.evening_boost_active:
+            response_probability = 0.40  # Higher in evening
+        
+        # Random responses in groups
         if random.random() < response_probability:
             return True
         
         # Respond if conversation is interesting
         interesting_topics = ["movie", "food", "college", "study", "exam", "dinner", "lunch", "party", "hangout", "chai", "night", "evening"]
         if any(topic in text_lower for topic in interesting_topics):
-            if random.random() < 0.25:  # Higher chance for interesting topics
-                return True
+            return random.random() < 0.30  # 30% chance for interesting topics
     
-    # Private messages from others (respond sometimes)
+    # Private messages from others (respond more often)
     if message.chat.type == "private":
         if mood_system.evening_boost_active:
-            return random.random() < 0.7  # 70% chance in evening
-        return random.random() < 0.6  # 60% chance normally
+            return random.random() < 0.80  # 80% chance in evening
+        return random.random() < 0.70  # 70% chance normally
     
     return False
 
@@ -627,7 +626,7 @@ async def handle_message(app: Client, message: Message):
             if random.random() < 0.3:
                 await asyncio.sleep(random.uniform(3, 15))
                 # Small chance to reply after delay
-                if random.random() < 0.3:
+                if random.random() < 0.4:
                     pass  # Continue to reply
                 else:
                     return
@@ -655,8 +654,8 @@ async def handle_message(app: Client, message: Message):
         typing_delay = mood_system.get_typing_delay(len(text))
         await asyncio.sleep(typing_delay)
         
-        # For boyfriend, sometimes send sweet/affectionate messages
-        if is_boyfriend and random.random() < 0.3:
+        # For boyfriend in private chat, sometimes send sweet/affectionate messages first
+        if is_boyfriend and message.chat.type == "private" and random.random() < 0.25:
             if random.random() < 0.5:
                 # Send a sweet message first
                 sweet_msgs = [
@@ -726,8 +725,8 @@ async def handle_message(app: Client, message: Message):
         # Send response
         await message.reply(response)
         
-        # For boyfriend: sometimes send follow-up after delay
-        if is_boyfriend and random.random() < 0.4:
+        # For boyfriend in private chat: sometimes send follow-up after delay
+        if is_boyfriend and message.chat.type == "private" and random.random() < 0.4:
             await asyncio.sleep(random.uniform(5, 20))
             
             # Choose appropriate follow-up based on time and mood
@@ -995,15 +994,15 @@ async def main():
         asyncio.create_task(scheduler_task(app))
         logger.info("⏰ Scheduler task started")
         
-        # Note: Won't send startup message due to peer_id_invalid error
-        # This usually means the bot hasn't interacted with boyfriend yet
-        # It will work once boyfriend messages first
-        
         logger.info("🎯 Suhani is now active and listening...")
         logger.info("💕 Personality: Real Indian girlfriend mode activated")
         logger.info("🍲 Will check meals at: Breakfast(8-9), Lunch(1-2), Dinner(8-9)")
         logger.info("🌙 Evening boost active: 8 PM to 12 AM IST")
-        logger.info("⚠️ Note: Send me a message first in Telegram to establish connection")
+        logger.info("📱 Response rates:")
+        logger.info("  • Boyfriend in groups: 30%")
+        logger.info("  • Boyfriend in private: 85%")
+        logger.info("  • Strangers in DMs: 70-80%")
+        logger.info("  • Groups (others): 20-40%")
         
         # Keep the bot running
         idle_count = 0
