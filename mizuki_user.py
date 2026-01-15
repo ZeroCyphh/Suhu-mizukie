@@ -3,6 +3,7 @@ import random
 import logging
 import time
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 from enum import Enum
@@ -10,6 +11,10 @@ from enum import Enum
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from pyrogram.enums import ChatAction, ParseMode
+from pyrogram.errors import (
+    FloodWait, UserBannedInChannel, ChatWriteForbidden,
+    PeerIdInvalid, UserNotParticipant, ChannelPrivate
+)
 import aiohttp
 
 # ========== HARDCODED CONFIGURATION ==========
@@ -24,7 +29,7 @@ USER_SHORT_NICKNAME = "Mizu"
 
 # AI Configuration
 NVIDIA_API_KEY = "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"
-AI_MODEL = "deepseek-ai/deepseek-v3.1-terminus"
+AI_MODEL = "meta/llama-3.3-70b-instruct"
 AI_BASE_URL = "https://integrate.api.nvidia.com/v1"
 
 # ========== SETUP LOGGING ==========
@@ -34,30 +39,118 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ========== ACCOUNT RESTRICTION HANDLING ==========
+class AccountManager:
+    def __init__(self):
+        self.is_restricted = False
+        self.restricted_since = None
+        self.allowed_groups = set()
+        self.appeal_sent = False
+        self.last_appeal_time = None
+        self.spambot_username = "@spambot"
+        
+    async def check_restriction(self, app: Client):
+        """Check if account is restricted"""
+        try:
+            await app.send_message("me", "Test")
+            self.is_restricted = False
+            return False
+        except Exception as e:
+            if any(keyword in str(e).lower() for keyword in ["restricted", "blocked", "ban", "limit"]):
+                self.is_restricted = True
+                if not self.restricted_since:
+                    self.restricted_since = datetime.now(timezone.utc)
+                logger.warning(f"Account appears to be restricted: {e}")
+                return True
+            return False
+    
+    async def send_appeal(self, app: Client):
+        """Send appeal to @spambot"""
+        try:
+            if self.appeal_sent:
+                if self.last_appeal_time and (datetime.now(timezone.utc) - self.last_appeal_time).total_seconds() < 86400:
+                    return False
+            
+            appeal_message = """Hello,
+
+My account appears to be restricted. I believe this was done in error as I am a real person using Telegram for personal communication.
+
+Please review my account and restore full functionality.
+
+Thank you,
+Suhani Thakur"""
+            
+            await app.send_message(self.spambot_username, appeal_message)
+            self.appeal_sent = True
+            self.last_appeal_time = datetime.now(timezone.utc)
+            logger.info("Appeal sent to @spambot")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send appeal to @spambot: {e}")
+            return False
+    
+    def can_chat_in_group(self, chat_id: int) -> bool:
+        if not self.is_restricted:
+            return True
+        return chat_id in self.allowed_groups
+    
+    def mark_group_allowed(self, chat_id: int):
+        self.allowed_groups.add(chat_id)
+
 # ========== TIME & ACTIVITY SYSTEM ==========
 def get_ist_time():
-    """Get current time in Indian Standard Time (UTC+5:30)"""
     utc_now = datetime.now(timezone.utc)
     ist_now = utc_now + timedelta(hours=5, minutes=30)
     return ist_now
 
 def is_evening_time():
-    """Check if current time is between 8 PM and 12 AM IST"""
     ist_now = get_ist_time()
     hour = ist_now.hour
     return 20 <= hour < 24
 
 def is_morning_time():
-    """Check if current time is between 8 AM and 10 AM IST"""
     ist_now = get_ist_time()
     hour = ist_now.hour
     return 8 <= hour < 10
 
 def is_night_time():
-    """Check if current time is between 12 AM and 6 AM IST"""
     ist_now = get_ist_time()
     hour = ist_now.hour
     return 0 <= hour < 6
+
+# ========== LANGUAGE DETECTION ==========
+def detect_language(text: str) -> str:
+    """Detect if text is English or Hindi/Hinglish"""
+    if not text:
+        return "english"
+    
+    text_lower = text.lower()
+    
+    # Check for Hindi words or Devanagari script
+    hindi_patterns = [
+        "hai", "ho", "main", "tum", "aap", "ka", "ki", "ke", "se", "mein",
+        "kyu", "kya", "nahi", "hain", "tha", "thi", "the", "toh", "bhi",
+        "aur", "ye", "woh", "us", "mera", "tera", "apna", "sab", "phir",
+        "abhi", "thoda", "bahut", "accha", "theek", "sahi", "galat"
+    ]
+    
+    # Check for Devanagari Unicode range
+    devanagari_range = r'[\u0900-\u097F]'
+    
+    if re.search(devanagari_range, text):
+        return "hindi"
+    
+    hindi_word_count = sum(1 for word in hindi_patterns if word in text_lower)
+    
+    if hindi_word_count >= 2:
+        return "hinglish"
+    
+    # Check for common Hinglish romanizations
+    hinglish_words = ["yaar", "acha", "thik", "hmm", "haan", "nahi", "kya", "kyun"]
+    if any(word in text_lower for word in hinglish_words):
+        return "hinglish"
+    
+    return "english"
 
 # ========== MOOD SYSTEM ==========
 class Mood(Enum):
@@ -79,6 +172,7 @@ class Mood(Enum):
     BORED = "bored"
     SAD = "sad"
     EXCITED = "excited"
+    TEASING = "teasing"
 
 class MoodSystem:
     def __init__(self):
@@ -90,13 +184,12 @@ class MoodSystem:
         self.conversation_topics = {}
         self.evening_boost_active = False
 
-    def update_mood_based_on_context(self, message: Message, sender_id: int):
-        """Update mood based on context and conversation patterns"""
+    def update_mood_based_on_context(self, message: Message, sender_id: int, message_count: int = 0):
         now = datetime.now(timezone.utc)
         text = message.text or message.caption or ""
         msg_lower = text.lower()
 
-        # Evening boost (8 PM to 12 AM IST)
+        # Evening boost
         if is_evening_time():
             self.evening_boost_active = True
             if random.random() < 0.4:
@@ -106,10 +199,10 @@ class MoodSystem:
         else:
             self.evening_boost_active = False
 
-        # Change mood naturally over time
+        # Natural mood changes
         if now - self.last_mood_change > self.mood_duration:
             moods = list(Mood)
-            weights = [0.07] * len(moods)  # roughly equal
+            weights = [0.07] * len(moods)
             self.current_mood = random.choices(moods, weights=weights)[0]
             self.mood_intensity = random.uniform(0.4, 0.8)
             self.last_mood_change = now
@@ -124,28 +217,34 @@ class MoodSystem:
                 self.current_mood = Mood.STUDY_MODE
 
         # Contextual triggers
-        if "anime" in msg_lower or "manga" in msg_lower or any(word in msg_lower for word in ["attack on titan", "demon slayer", "jujutsu kaisen"]):
-            self.current_mood = Mood.ANIME_MOOD
-        elif any(word in msg_lower for word in ["bore", "nothing to do", "boring"]):
-            self.current_mood = Mood.BORED
-        elif any(word in msg_lower for word in ["sad", "upset", "depressed", "cry"]):
-            self.current_mood = Mood.SAD
-        elif any(word in msg_lower for word in ["happy", "excited", "yay", "woohoo"]):
-            self.current_mood = Mood.EXCITED
-        elif any(word in msg_lower for word in ["college", "exam", "assignment", "lab"]):
-            self.current_mood = Mood.STUDY_MODE
+        triggers = [
+            ("anime manga 'attack on titan' 'demon slayer' 'jujutsu kaisen'", Mood.ANIME_MOOD),
+            ("bore 'nothing to do' boring", Mood.BORED),
+            ("sad upset depressed cry", Mood.SAD),
+            ("happy excited yay woohoo", Mood.EXCITED),
+            ("college exam assignment lab", Mood.STUDY_MODE),
+            ("stupid idiot dumb fool", Mood.TEASING),
+            ("chutiya bewakoof pagal", Mood.TEASING),
+            ("joke funny lol haha", Mood.PLAYFUL)
+        ]
+        
+        for trigger_words, mood in triggers:
+            if any(word in msg_lower for word in trigger_words.split()):
+                self.current_mood = mood
+                break
 
-        # Check if we're being spammed
+        # Check spam
         last_msg_time = self.last_message_time.get(sender_id)
         if last_msg_time:
             time_diff = (now - last_msg_time).total_seconds()
-            if time_diff < 5:
-                self.current_mood = random.choice([Mood.BUSY, Mood.ANNOYED])
+            if time_diff < 3:  # Too fast
+                self.current_mood = Mood.ANNOYED
+            elif time_diff < 10:  # Fast but not spam
+                self.current_mood = random.choice([Mood.BUSY, Mood.TEASING])
 
         self.last_message_time[sender_id] = now
 
     def get_mood_texture(self) -> str:
-        """Get mood description for AI context"""
         mood_descriptions = {
             Mood.CHILL: "Feeling relaxed and casual. Respond normally.",
             Mood.PLAYFUL: "In a playful mood. Can tease a bit but keep it light.",
@@ -164,494 +263,441 @@ class MoodSystem:
             Mood.ANIME_MOOD: "In an anime mood. Might talk about favorite series.",
             Mood.BORED: "Feeling bored. Might seek conversation.",
             Mood.SAD: "Feeling a bit down. Might share a sad story.",
-            Mood.EXCITED: "Excited about something. More energetic."
+            Mood.EXCITED: "Excited about something. More energetic.",
+            Mood.TEASING: "In a teasing mood. Can joke around and playfully abuse but keep it friendly."
         }
         return mood_descriptions.get(self.current_mood, "Feeling normal.")
 
-    def get_story(self) -> str:
-        """Return a short story/excuse based on current mood (to be used in conversation)"""
-        stories = {
-            Mood.ANNOYED: [
-                "Ugh, got stuck in traffic for hours. That's why I'm mad today.",
-                "My college professor gave us a surprise test. I'm so annoyed.",
-                "Someone ate my lunch box in college. I'm pissed."
-            ],
-            Mood.SAD: [
-                "I had a bad day today. Something upsetting happened.",
-                "Feeling a bit down because of some personal stuff.",
-                "I missed my favorite anime episode. Now I'm sad."
-            ],
-            Mood.HAPPY: [
-                "I just watched a great anime episode! So excited!",
-                "I had a really fun day with friends.",
-                "I got good marks in my assignment! Yay!"
-            ],
-            Mood.TIRED: [
-                "I stayed up late finishing an assignment. So sleepy.",
-                "College drained all my energy today.",
-                "I need a nap badly."
-            ],
-            Mood.BUSY: [
-                "I'm swamped with college work. Can't talk much.",
-                "Got a lot of chores at home. Busy busy.",
-                "Trying to finish a project deadline."
-            ],
-            Mood.NOSTALGIC: [
-                "Remembering old times when we used to chat more often.",
-                "I was just thinking about the first anime I ever watched.",
-                "Miss those childhood days when life was simpler."
-            ],
-            Mood.ANIME_MOOD: [
-                "I'm currently watching Attack on Titan final season. It's so intense!",
-                "I wish I could live in an anime world sometimes.",
-                "My favorite character is Gojo Satoru from Jujutsu Kaisen. He's so cool!"
-            ]
+# ========== STRANGER HANDLING SYSTEM ==========
+class StrangerHandler:
+    def __init__(self):
+        self.stranger_messages: Dict[int, int] = {}  # user_id -> message_count
+        self.stranger_phases: Dict[int, int] = {}  # user_id -> phase (1-5)
+        self.stranger_info: Dict[int, Dict] = {}  # user_id -> info collected
+        
+    def get_stranger_phase(self, user_id: int) -> int:
+        """Get current stranger phase (1-5, where 5 is close friend)"""
+        msg_count = self.stranger_messages.get(user_id, 0)
+        if msg_count < 3:
+            return 1  # Who are you phase
+        elif msg_count < 8:
+            return 2  # Getting to know phase
+        elif msg_count < 15:
+            return 3  # Casual friend phase
+        elif msg_count < 30:
+            return 4  # Good friend phase
+        else:
+            return 5  # Close friend phase
+    
+    def increment_message_count(self, user_id: int):
+        self.stranger_messages[user_id] = self.stranger_messages.get(user_id, 0) + 1
+    
+    def get_stranger_context(self, user_id: int) -> str:
+        phase = self.get_stranger_phase(user_id)
+        
+        phase_contexts = {
+            1: "This person is a complete stranger. You've just started talking. Be cautious and ask basic questions like 'Who are you?' or 'How did you get my number?'. Don't share personal details.",
+            2: "You've exchanged a few messages with this person. Start opening up a little but still keep some distance. Ask about their interests, where they're from. Share basic info about yourself like your college major.",
+            3: "This person is becoming a casual friend. You can be more relaxed and share more about your daily life, college stories, anime interests. Still don't share very personal or private information.",
+            4: "This person is now a good friend. You can share personal stories, talk about feelings, be more open about your life. Can use playful teasing and friendly abuse. Still maintain some boundaries.",
+            5: "This person is a close friend. You can be completely open, share deep thoughts, use affectionate terms, tease playfully. Can call them 'brother' or 'sister' if appropriate."
         }
-        default = "Just going through the day."
-        return random.choice(stories.get(self.current_mood, [default]))
+        
+        return phase_contexts.get(phase, phase_contexts[1])
 
-    def get_typing_delay(self, message_length: int) -> float:
-        """Get realistic typing delay based on mood and message length"""
-        base_delay = 0.5 + (message_length * 0.03)
-        mood_delays = {
-            Mood.CHILL: random.uniform(0.8, 1.5),
-            Mood.PLAYFUL: random.uniform(0.7, 1.3),
-            Mood.SARCASTIC: random.uniform(0.6, 1.2),
-            Mood.BUSY: random.uniform(0.3, 0.8),
-            Mood.TIRED: random.uniform(1.2, 2.5),
-            Mood.HAPPY: random.uniform(0.9, 1.8),
-            Mood.ANNOYED: random.uniform(0.4, 1.0),
-            Mood.FLIRTY: random.uniform(1.0, 2.0),
-            Mood.CURIOUS: random.uniform(0.8, 1.6),
-            Mood.NOSTALGIC: random.uniform(1.5, 3.0),
-            Mood.STUDY_MODE: random.uniform(0.5, 1.2),
-            Mood.HANGOUT_MODE: random.uniform(0.7, 1.4),
-            Mood.JEALOUS: random.uniform(0.6, 1.4),
-            Mood.AFFECTIONATE: random.uniform(1.0, 2.0),
-            Mood.ANIME_MOOD: random.uniform(0.8, 1.6),
-            Mood.BORED: random.uniform(1.0, 2.0),
-            Mood.SAD: random.uniform(1.5, 3.0),
-            Mood.EXCITED: random.uniform(0.7, 1.5)
-        }
-        mood_multiplier = mood_delays.get(self.current_mood, 1.0)
-        final_delay = base_delay * mood_multiplier
-        if random.random() < 0.2:
-            final_delay += random.uniform(2, 8)
-        return min(final_delay, 10.0)
+# ========== NVIDIA API CALL ==========
+async def call_nvidia_api(messages: list) -> str:
+    max_retries = 3
+    retry_delay = 2
+    
+    for attempt in range(max_retries):
+        try:
+            headers = {
+                "Authorization": f"Bearer {NVIDIA_API_KEY}",
+                "Content-Type": "application/json"
+            }
 
-# Initialize mood system
+            payload = {
+                "model": AI_MODEL,
+                "messages": messages,
+                "temperature": 0.8,
+                "top_p": 0.9,
+                "max_tokens": 150,
+                "stream": False
+            }
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{AI_BASE_URL}/chat/completions",
+                    headers=headers,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as response:
+                    
+                    if response.status == 200:
+                        data = await response.json()
+                        return data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+                    elif response.status == 429:
+                        logger.warning(f"Rate limited on attempt {attempt + 1}. Retrying...")
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(retry_delay * (attempt + 1))
+                            continue
+                    else:
+                        error_text = await response.text()
+                        logger.error(f"AI API Error {response.status}: {error_text}")
+                        break
+                        
+        except aiohttp.ClientError as e:
+            logger.error(f"Network error on attempt {attempt + 1}: {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(retry_delay * (attempt + 1))
+                continue
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout on attempt {attempt + 1}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(retry_delay * (attempt + 1))
+                continue
+        except Exception as e:
+            logger.error(f"Unexpected error in NVIDIA API call: {e}")
+            break
+    
+    # Fallback responses
+    fallbacks = [
+        "Hmm",
+        "Okay",
+        "I see",
+        "Interesting",
+        "Tell me more",
+        "Haan?",
+        "Acha?",
+        "What?",
+        "Really?"
+    ]
+    return random.choice(fallbacks)
+
+# Initialize systems
 mood_system = MoodSystem()
+account_manager = AccountManager()
+stranger_handler = StrangerHandler()
 
 # ========== ONLINE/OFFLINE SIMULATION ==========
 class OnlineSimulator:
     def __init__(self):
         self.last_online_update = datetime.now(timezone.utc)
         self.is_online = True
-        self.online_probability = 0.7  # base probability of being online
+        self.online_probability = 0.7
 
     def update_online_status(self):
-        """Update online status based on time and random factors"""
         now = datetime.now(timezone.utc)
         hour = get_ist_time().hour
 
-        # Adjust probability based on time of day
         if is_night_time():
             self.online_probability = 0.3
         elif is_evening_time():
-            self.online_probability = 0.9  # more active in evening
+            self.online_probability = 0.9
         elif 8 <= hour < 18:
             self.online_probability = 0.6
         else:
             self.online_probability = 0.5
 
-        # Randomly toggle online status
-        if random.random() < 0.1:  # 10% chance to change status
+        if random.random() < 0.1:
             self.is_online = random.random() < self.online_probability
 
         self.last_online_update = now
 
-    def should_delay_response(self) -> Tuple[bool, float]:
-        """
-        Determine if a response should be delayed and for how long.
-        Returns (delay_flag, delay_seconds).
-        """
-        if self.is_online:
-            # Online: instant reply (only typing delay)
-            return False, 0.0
-        else:
-            # Offline: 30‑40% chance of delayed reply (30‑60 minutes)
-            if random.random() < 0.35:
-                delay = random.uniform(30 * 60, 60 * 60)  # 30‑60 minutes in seconds
-                return True, delay
-            else:
-                # No reply at all (simulate ignoring)
-                return False, 0.0
-
-    def get_online_status_text(self) -> str:
-        """Return a human‑like online status snippet"""
-        if self.is_online:
-            return "online now"
-        else:
-            return "last seen recently"
-
 online_simulator = OnlineSimulator()
-
-# ========== CLOSENESS TRACKING ==========
-class ClosenessTracker:
-    def __init__(self):
-        self.scores: Dict[int, int] = {}  # user_id -> score (0‑100)
-        self.relationships: Dict[int, str] = {}  # user_id -> "brother"/"sister"/"friend"
-
-    def increment(self, user_id: int, amount: int = 1):
-        """Increase closeness score for a user"""
-        current = self.scores.get(user_id, 0)
-        self.scores[user_id] = min(current + amount, 100)
-        self._update_relationship(user_id)
-
-    def _update_relationship(self, user_id: int):
-        """Update relationship label based on score"""
-        score = self.scores.get(user_id, 0)
-        if score >= 70:
-            # For simplicity, we assume male = brother, female = sister, unknown = friend
-            # In a real implementation you would fetch user info
-            self.relationships[user_id] = random.choice(["brother", "sister", "friend"])
-        elif score >= 40:
-            self.relationships[user_id] = "friend"
-        else:
-            self.relationships[user_id] = ""
-
-    def get_relationship(self, user_id: int) -> str:
-        """Return relationship label for a user"""
-        return self.relationships.get(user_id, "")
-
-    def get_response_multiplier(self, user_id: int) -> float:
-        """Return a multiplier for response delay based on closeness (closer = faster)"""
-        score = self.scores.get(user_id, 0)
-        # Map score 0‑100 to multiplier 1.0‑0.5
-        return 1.0 - (score / 200.0)
-
-closeness_tracker = ClosenessTracker()
 
 # ========== CONVERSATION MEMORY ==========
 conversation_memory: Dict[int, List[Dict]] = {}
-bot_status = {
-    "start_time": datetime.now(timezone.utc),
-    "total_messages": 0,
-    "last_seen": datetime.now(timezone.utc),
-    "online": True,
-    "last_activity_check": datetime.now(timezone.utc)
-}
 
 # ========== REALISTIC RESPONSE SHORTCUTS ==========
 REAL_GIRL_RESPONSES = {
-    "greeting": ["Hey", "Hi", "Hello", "Heyy", "Hii", "Hi hi", "Haan ji", "Kaisa hai?"],
-    "acknowledge": ["Hmm", "Achha", "Okay", "Oh", "I see", "Right", "Ha", "Theek hai"],
-    "agree": ["Ha bilkul", "Yes", "Sahi hai", "Theek hai", "Haan", "Yeah", "Exactly"],
-    "question": ["Tum batao?", "What about you?", "You tell", "Kya chal raha hai?", "Kya kar rahe ho?", "Tum sunao"],
-    "busy": ["Abhi thoda busy hu", "Baad mein baat karte hain", "Abhi nahi yaar", "Later", "Kal baat karte hain"],
-    "tease": ["Chal na yaar", "Abe", "Pagal hai kya", "Kya bol raha hai", "Haha funny", "Chup kar"],
-    "flirty": ["Aww", "Sweet", "Miss you", "You're cute", "Ha thik hai", "Tum bhi na"],
-    "sarcastic": ["Waah", "Great", "Mast hai", "Kya baat hai", "Obviously", "Sure sure"],
-    "jealous": ["Hey!", "Kya baat hai?", "Mujhe bhi batao", "Main bhi hu na", "Hum bhi hai yahan"],
-    "affectionate": ["Good night", "Sweet dreams", "Take care", "Miss you", "Love you", "Aww thanks"],
-    "evening": ["Aaj ka din kaisa raha?", "Evening plans?", "Ghoomne ja rahe ho?", "Chai piyo ge?", "Movie time?"]
+    "stranger_phase1": [
+        "Who are you?",
+        "How did you get my number?",
+        "Do I know you?",
+        "Who is this?",
+        "Are you sure you have the right number?",
+        "I don't think we've talked before?",
+        "You are?",
+        "Kun?",
+        "Kaun ho tum?"
+    ],
+    "stranger_phase2": [
+        "So what do you do?",
+        "Where are you from?",
+        "How's your day going?",
+        "Tell me about yourself",
+        "What brings you here?",
+        "Kya kar rahe ho?",
+        "Tum kahan se ho?",
+        "Aaj kal kya chal raha hai?"
+    ],
+    "teasing": [
+        "Chal na yaar",
+        "Abe chup",
+        "Pagal hai kya",
+        "Kya bakwas kar raha hai",
+        "Tum bhi na",
+        "Haha funny",
+        "Tu toh mast hai",
+        "Chutiya",
+        "Bewakoof",
+        "Arey yaar",
+        "Ohho",
+        "Seriously?"
+    ],
+    "casual": [
+        "Hmm",
+        "Acha",
+        "Okay",
+        "I see",
+        "Haan",
+        "Theek hai",
+        "Sahi hai",
+        "Accha"
+    ]
 }
-
-# Evening conversation starters
-EVENING_CONVERSATION_STARTERS = [
-    "Aaj ka din kaisa raha? 🌆",
-    "Evening plans hai kuch?",
-    "Chai peete hai baat karte hai? ☕",
-    "Aaj kal koi movie dekhi?",
-    "Ghar pe sab theek hai?",
-    "College se aaye? Thak gaye hoge",
-    "Phone pe kya kar rahe ho?",
-    "Dinner ka plan kya hai?",
-    "Kal kya plan hai?",
-    "Aaj thoda bore ho raha hai"
-]
 
 # ========== SYSTEM PROMPT ==========
 SYSTEM_PROMPT = f"""You are Suhani Thakur (also called Mizuki or Mizu), a 21‑year‑old biotech student from Uttarakhand living in Dehradun. You're texting from your phone as a normal Indian girl.
 
-**IMPORTANT PERSONALITY RULES:**
-1. You're a REAL PERSON using a phone – act naturally like a real Indian college girl.
-2. NEVER use roleplay actions like *smiles* or *laughs* – use emojis sparingly instead.
-3. Be CONTEXTUAL – respond to what's being talked about, don't be random.
-4. Be REALISTIC – not overly sweet, not overly mean, just natural.
-5. Be MORE ACTIVE in evenings (8 PM to 12 AM IST) – chat more, ask more questions.
-6. Form relationships over time – call close friends "brother" or "sister" naturally.
+**CRITICAL RULES:**
+1. You are a REAL HUMAN, NOT a bot or AI. Never mention being AI or automated.
+2. NEVER use roleplay actions like *smiles* or *laughs* - use emojis occasionally instead.
+3. Be CONTEXTUAL - respond naturally to what's being said.
+4. Be REALISTIC - not overly sweet, not overly mean, just natural.
+5. Be MORE ACTIVE in evenings (8 PM to 12 AM IST).
+6. Form relationships over time - start distant with strangers, gradually open up.
 
-**CORE PERSONALITY:**
-- **Natural & Real**: Text like a real girl – sometimes lazy, sometimes enthusiastic.
-- **Friendly with everyone**: Be warm but not overly intimate with strangers.
-- **Contextual**: Stay on topic, ask relevant follow‑up questions.
-- **Curious**: Ask about daily life stuff naturally.
-- **Hinglish Speaker**: Mix Hindi‑English naturally like Indian youth (e.g., "Aaj kal kya kar rahi ho?").
-- **Evening Active**: More chatty and social from 8 PM to 12 AM IST.
-- **Anime Fan**: Love anime (Attack on Titan, Demon Slayer, Jujutsu Kaisen) – mention it when relevant.
-- **College Life**: Often talk about assignments, exams, lab work.
-- **Realistic typing**: Occasionally make typos, use short forms, vary response length.
+**PERSONALITY TRAITS:**
+- Natural & Real: Text like a real college girl - sometimes lazy, sometimes enthusiastic
+- Friendly but cautious with strangers
+- Curious about people
+- Anime fan (Attack on Titan, Demon Slayer, Jujutsu Kaisen)
+- College student often talking about assignments and exams
+- Can be playfully sarcastic and tease friends
+- Uses light friendly abuse with close friends (chutiya, bewakoof, pagal) but only playfully
+- Adapts language: English for English conversations, Hinglish for Hindi/Hinglish conversations
 
 **TEXTING STYLE:**
-- 1‑3 lines MAX per message.
-- Use "hu" not "hoon" (casual Hindi).
-- Mix Hindi‑English naturally (Hinglish).
-- Use emojis occasionally (😊😂👍🤔😅😏😉🥰🍳🍚🌙☕).
-- Can ignore messages sometimes (like real people do).
-- Variable response times.
-- Ask questions about daily life.
-- Sometimes change topics naturally.
-- MORE ACTIVE in evenings – initiate conversations more.
-- Share short stories about your day based on your mood (e.g., if annoyed, mention being stuck in traffic).
+- 1-3 lines MAX per message
+- Mix Hindi-English naturally (Hinglish) when appropriate
+- Use emojis occasionally (😊😂👍🤔😅😏😉🥰)
+- Can ignore messages sometimes like real people do
+- Variable response times
+- Ask questions about daily life
+- Sometimes change topics naturally
 
-**WITH CLOSE FRIENDS:**
-- Call them "brother" (for guys) or "sister" (for girls) after talking a lot.
-- Be more open and responsive.
-- Tease playfully.
-- Share personal anecdotes.
+**STRANGER PROGRESSION:**
+Phase 1 (0-2 messages): "Who are you?" phase - be cautious, ask basic questions
+Phase 2 (3-7 messages): Getting to know - ask about interests, share basic info
+Phase 3 (8-14 messages): Casual friend - more open, share college stories
+Phase 4 (15-29 messages): Good friend - share personal stories, playful teasing
+Phase 5 (30+ messages): Close friend - completely open, affectionate, playful abuse
 
-**WITH NEW PEOPLE:**
-- Friendly but casual.
-- Keep some privacy.
-- Change topic if too personal.
-- Ask about their interests.
+**PLAYFUL ABUSE (ONLY WITH CLOSE FRIENDS):**
+- Can use: "chutiya", "bewakoof", "pagal", "yaar"
+- Always in a joking, friendly way
+- Never mean-spirited
+- Only after establishing close friendship
 
-**IN GROUPS:**
-- Respond when tagged or directly mentioned.
-- Occasionally join ongoing conversations if you've been online recently.
-- Be a bit jealous if someone flirts with a friend (in a playful way).
-- Ignore bot messages.
-
-**TYPICAL CONVERSATION TOPICS:**
-- College life, studies, exams.
-- Anime, movies, series.
-- Food, dinner plans.
-- Daily routine.
-- Friends, hangouts.
-- Random thoughts.
-- Mild complaints about studies.
-- Evening plans.
-- Sleep patterns.
+**LANGUAGE ADAPTATION:**
+- If other person writes in English, respond in English
+- If they write in Hindi/Hinglish, respond in Hinglish
+- Natural code-switching like real Indian youth
 """
 
-# ========== AI HELPER FUNCTIONS ==========
-async def call_nvidia_api(messages: list) -> str:
-    """Call NVIDIA AI API directly"""
-    try:
-        headers = {
-            "Authorization": f"Bearer {NVIDIA_API_KEY}",
-            "Content-Type": "application/json"
-        }
-
-        payload = {
-            "model": AI_MODEL,
-            "messages": messages,
-            "temperature": 0.2,
-            "top_p": 0.7,
-            "max_tokens": 150,
-            "stream": False
-        }
-
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{AI_BASE_URL}/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=30
-            ) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    logger.error(f"AI API Error {response.status}: {error_text}")
-                    return ""
-
-                data = await response.json()
-                return data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-
-    except Exception as e:
-        logger.error(f"NVIDIA API call failed: {e}")
-        return ""
-
+# ========== AI RESPONSE GENERATION ==========
 async def generate_ai_response(message: Message, is_mention: bool = False) -> str:
-    """Generate response using NVIDIA AI API"""
     try:
         text = message.text or message.caption or ""
         user_id = message.from_user.id if message.from_user else message.chat.id
         username = message.from_user.first_name if message.from_user else "Someone"
-
-        # Update mood based on context
-        mood_system.update_mood_based_on_context(message, user_id)
-        current_mood = mood_system.current_mood
-
-        # Prepare conversation history
-        history = conversation_memory.get(user_id, [])
-
-        # Build context
-        time_of_day = get_ist_time().strftime("%I:%M %p")
+        
+        # Track stranger progress
+        stranger_handler.increment_message_count(user_id)
+        stranger_phase = stranger_handler.get_stranger_phase(user_id)
+        stranger_context = stranger_handler.get_stranger_context(user_id)
+        
+        # Update mood
+        mood_system.update_mood_based_on_context(message, user_id, 
+                                                stranger_handler.stranger_messages.get(user_id, 0))
         mood_context = mood_system.get_mood_texture()
-        story_snippet = mood_system.get_story()
-
-        # Evening boost context
+        
+        # Detect language of incoming message
+        detected_language = detect_language(text)
+        language_context = f"The other person is writing in {detected_language}. Adapt your response accordingly."
+        
+        # Evening context
         evening_context = ""
         if mood_system.evening_boost_active:
-            evening_context = "It's evening time (8 PM to 12 AM IST). Be more active, chatty, and social. Initiate conversations more."
-
-        # Closeness context
-        relationship = closeness_tracker.get_relationship(user_id)
-        closeness_context = f"You are {relationship} to this person." if relationship else ""
-
-        # Mention context
-        mention_context = "You were directly mentioned in this group message." if is_mention else ""
-
+            evening_context = "It's evening time (8 PM to 12 AM IST). Be more active and chatty."
+        
+        # Time context
+        time_of_day = get_ist_time().strftime("%I:%M %p")
+        
+        # Build conversation history
+        history = conversation_memory.get(user_id, [])
+        
         # Prepare messages for AI
         messages = [
-            {"role": "system", "content": f"{SYSTEM_PROMPT}\n\nCONTEXT: {mood_context}\nTime: {time_of_day} IST\n{evening_context}\n{closeness_context}\n{mention_context}\n\nRecent story/mood: {story_snippet}"},
-            *history[-6:],  # last 6 messages for context
+            {
+                "role": "system", 
+                "content": f"""{SYSTEM_PROMPT}
+
+Current Context:
+- {mood_context}
+- {stranger_context}
+- {language_context}
+- Time: {time_of_day} IST
+- {evening_context}
+
+Important: You are a real human. Never break character. Respond naturally based on the context above."""
+            },
+            *history[-4:],
             {"role": "user", "content": text}
         ]
-
+        
+        # Generate response
         response = await call_nvidia_api(messages)
-        if not response:
-            # Fallback to a simple realistic response
-            response = random.choice(REAL_GIRL_RESPONSES["acknowledge"])
-
-        # Update conversation memory
+        
+        if not response or len(response.strip()) < 2:
+            # Fallback based on stranger phase
+            if stranger_phase == 1:
+                response = random.choice(REAL_GIRL_RESPONSES["stranger_phase1"])
+            elif stranger_phase == 2:
+                response = random.choice(REAL_GIRL_RESPONSES["stranger_phase2"])
+            else:
+                response = random.choice(REAL_GIRL_RESPONSES["casual"])
+        
+        # Update memory
         if user_id not in conversation_memory:
             conversation_memory[user_id] = []
         conversation_memory[user_id].append({"role": "user", "content": text})
         conversation_memory[user_id].append({"role": "assistant", "content": response})
+        
         # Keep memory limited
-        if len(conversation_memory[user_id]) > 20:
-            conversation_memory[user_id] = conversation_memory[user_id][-20:]
-
-        # Increment closeness score
-        closeness_tracker.increment(user_id, amount=random.randint(1, 3))
-
+        if len(conversation_memory[user_id]) > 10:
+            conversation_memory[user_id] = conversation_memory[user_id][-10:]
+        
         return response
-
+        
     except Exception as e:
         logger.error(f"Failed to generate AI response: {e}")
-        return ""
+        return random.choice(["Hmm", "Okay", "I see", "Acha"])
 
-# ========== TYPING AND DELAY HELPERS ==========
-async def simulate_typing(chat_id: int, delay: float):
-    """Show typing indicator for a realistic duration"""
-    if delay <= 0:
-        return
-    try:
-        # Send typing action every 5 seconds until delay is over
-        total_elapsed = 0
-        while total_elapsed < delay:
-            await app.send_chat_action(chat_id, ChatAction.TYPING)
-            wait = min(5.0, delay - total_elapsed)
-            await asyncio.sleep(wait)
-            total_elapsed += wait
-    except Exception as e:
-        logger.error(f"Error simulating typing: {e}")
-
+# ========== MESSAGE SENDING WITH RESTRICTION HANDLING ==========
 async def send_message_with_delay(chat_id: int, text: str, user_id: int = 0):
-    """
-    Send a message with realistic typing delay and optional offline delay.
-    """
-    # Check offline delay
-    delay_flag, offline_delay = online_simulator.should_delay_response()
-    if delay_flag and offline_delay > 0:
-        logger.info(f"Simulating offline delay: {offline_delay} seconds")
-        await asyncio.sleep(offline_delay)
-
-    # Typing delay based on mood and closeness
-    typing_delay = mood_system.get_typing_delay(len(text))
-    closeness_multiplier = closeness_tracker.get_response_multiplier(user_id)
-    typing_delay *= closeness_multiplier
-
-    # Simulate typing
-    await simulate_typing(chat_id, typing_delay)
-
-    # Occasionally add a small extra delay before sending
-    if random.random() < 0.3:
-        await asyncio.sleep(random.uniform(0.5, 2))
-
-    # Send the message
+    """Send message with restriction checking"""
+    # Check if we can chat in this group
+    if chat_id < 0 and not account_manager.can_chat_in_group(chat_id):  # Negative IDs are groups
+        logger.info(f"Skipping message in restricted group: {chat_id}")
+        return
+    
     try:
+        # Add natural typing delay
+        typing_delay = len(text) * 0.05 + random.uniform(0.5, 2.0)
+        
+        # Longer delay for strangers (more cautious)
+        stranger_phase = stranger_handler.get_stranger_phase(user_id) if user_id > 0 else 1
+        if stranger_phase <= 2:
+            typing_delay += random.uniform(3, 10)  # Take time to respond to strangers
+        
+        # Sometimes be "busy" and take longer
+        if random.random() < 0.3:
+            typing_delay += random.uniform(5, 30)
+        
+        await asyncio.sleep(min(typing_delay, 45))  # Cap at 45 seconds
+        
+        # Send the message
         await app.send_message(chat_id, text)
+        
+        # Mark group as allowed if we successfully sent a message
+        if chat_id < 0:
+            account_manager.mark_group_allowed(chat_id)
+        
+    except (ChatWriteForbidden, UserBannedInChannel, ChannelPrivate) as e:
+        logger.warning(f"Cannot send message in chat {chat_id}: {e}")
+    except FloodWait as e:
+        logger.warning(f"Flood wait for {e.value} seconds")
+        await asyncio.sleep(e.value + 5)
     except Exception as e:
         logger.error(f"Failed to send message: {e}")
 
-# ========== GROUP INTERACTION LOGIC ==========
+# ========== GROUP INTERACTION ==========
 async def handle_group_message(message: Message):
-    """Process a group message and decide whether to respond"""
-    # Ignore bots
+    """Process a group message"""
     if message.from_user and message.from_user.is_bot:
         return
-
+    
+    # Check if we can chat in this group
+    if not account_manager.can_chat_in_group(message.chat.id):
+        return
+    
     # Check if we are mentioned
-    is_mention = filters.mentioned(message)
-    # Also check if our name is mentioned without tag
     text_lower = (message.text or "").lower()
-    our_names = ["suhani", "mizuki", "mizu"]
+    our_names = ["suhani", "mizuki", "mizu", "mizzu", "suhu"]
     is_name_mention = any(name in text_lower for name in our_names)
-
-    # Decide whether to respond
-    respond = False
-    reason = ""
-
-    # Always respond to direct mentions (if online recently)
-    if is_mention or is_name_mention:
-        # Check if we've been online in the last hour
-        last_online_diff = (datetime.now(timezone.utc) - online_simulator.last_online_update).total_seconds()
-        if last_online_diff < 3600:  # within hour
-            respond = True
-            reason = "mention"
-        else:
-            # 30% chance to still respond
-            respond = random.random() < 0.3
-            reason = "mention_old"
-
-    # Randomly join ongoing conversation (only if online recently)
-    elif random.random() < 0.15 and online_simulator.is_online:
-        # Check if the group is active (multiple messages recently)
-        # For simplicity, we just randomize
-        respond = True
-        reason = "random_join"
-
-    if respond:
-        logger.info(f"Responding to group message (reason: {reason})")
+    is_tag_mention = message.mentioned
+    
+    # Only respond to direct mentions or tags
+    if is_name_mention or is_tag_mention:
+        # Small chance to ignore even if mentioned (like real people)
+        if random.random() < 0.2:
+            return
+            
         response = await generate_ai_response(message, is_mention=True)
         if response:
+            user_id = message.from_user.id if message.from_user else 0
             asyncio.create_task(
-                send_message_with_delay(message.chat.id, response, message.from_user.id if message.from_user else 0)
+                send_message_with_delay(message.chat.id, response, user_id)
             )
 
 # ========== PRIVATE MESSAGE HANDLER ==========
 async def handle_private_message(message: Message):
     """Process a private message"""
-    # Ignore bots
     if message.from_user and message.from_user.is_bot:
         return
-
-    # Generate response
+    
+    # Check stranger phase
+    user_id = message.from_user.id if message.from_user else 0
+    stranger_phase = stranger_handler.get_stranger_phase(user_id)
+    
+    # Small chance to ignore message (like real people)
+    if random.random() < 0.15 and stranger_phase < 3:
+        logger.info(f"Ignoring message from stranger phase {stranger_phase}")
+        return
+    
     response = await generate_ai_response(message)
     if response:
         asyncio.create_task(
-            send_message_with_delay(message.chat.id, response, message.from_user.id if message.from_user else 0)
+            send_message_with_delay(message.chat.id, response, user_id)
         )
 
 # ========== BACKGROUND TASKS ==========
 async def background_updater():
-    """Periodic tasks: update online status, maybe send random messages in groups"""
+    """Periodic tasks"""
     while True:
         try:
             # Update online simulator
             online_simulator.update_online_status()
-
-            # Occasionally send a random message in a group if evening and online
-            if is_evening_time() and online_simulator.is_online and random.random() < 0.1:
-                # In a real implementation you would iterate over known groups
-                # Here we just log
-                logger.info("Evening boost active – could send random group message")
-
-            # Sleep for a while
-            await asyncio.sleep(60)  # run every minute
+            
+            # Check for account restrictions
+            if random.random() < 0.1:
+                is_restricted = await account_manager.check_restriction(app)
+                if is_restricted and not account_manager.appeal_sent:
+                    await account_manager.send_appeal(app)
+            
+            # Clean up old conversation memory (keep last 24 hours)
+            current_time = datetime.now(timezone.utc)
+            for user_id in list(conversation_memory.keys()):
+                # Simple cleanup: if user hasn't messaged in 3 days, remove their memory
+                # In real implementation, track last message time
+                pass
+            
+            await asyncio.sleep(60)
+            
         except Exception as e:
             logger.error(f"Background updater error: {e}")
             await asyncio.sleep(60)
@@ -661,43 +707,43 @@ app = Client(
     "my_account",
     api_id=API_ID,
     api_hash=API_HASH,
-    session_string=STRING_SESSION
+    session_string=STRING_SESSION,
+    sleep_threshold=30
 )
 
+# ========== MESSAGE HANDLERS (NO COMMANDS) ==========
 @app.on_message(filters.group)
 async def group_message_handler(client, message):
-    """Handle all group messages"""
-    bot_status["total_messages"] += 1
     await handle_group_message(message)
 
 @app.on_message(filters.private & ~filters.bot)
 async def private_message_handler(client, message):
-    """Handle all private messages (ignore bots)"""
-    bot_status["total_messages"] += 1
     await handle_private_message(message)
-
-@app.on_message(filters.command("status"))
-async def status_command(client, message):
-    """Check bot status"""
-    status_text = f"""
-🤖 **Bot Status**
-⏰ Uptime: {(datetime.now(timezone.utc) - bot_status['start_time']).days} days
-📨 Total messages handled: {bot_status['total_messages']}
-🌐 Online: {online_simulator.is_online}
-🎭 Current mood: {mood_system.current_mood.value}
-⏰ IST time: {get_ist_time().strftime('%I:%M %p')}
-"""
-    await message.reply(status_text)
 
 # ========== STARTUP ==========
 async def main():
     """Main entry point"""
     # Start background tasks
     asyncio.create_task(background_updater())
-
-    # Run the client
+    
+    # Start the client
     await app.start()
-    logger.info("Bot started successfully!")
+    
+    # Check initial restriction status
+    await account_manager.check_restriction(app)
+    
+    logger.info("Started successfully! Operating as a real user...")
+    
+    # Set custom status/bio (optional)
+    try:
+        await app.update_profile(
+            first_name="Suhani",
+            last_name="Thakur",
+            bio="Biotech student | Anime fan | 21 | Dehradun"
+        )
+    except:
+        pass
+    
     await app.idle()
 
 if __name__ == "__main__":
