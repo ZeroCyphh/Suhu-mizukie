@@ -6,8 +6,6 @@ import json
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any
-import sqlite3
-import threading
 
 from pyrogram import Client, filters
 from pyrogram.types import Message, User
@@ -31,6 +29,15 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+# ========== MAIN CLIENT ==========
+app = Client(
+    "my_account",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    session_string=STRING_SESSION,
+    sleep_threshold=30
+)
 
 # ========== NAME & BIO ROTATION ==========
 NAME_VARIANTS = [
@@ -566,58 +573,6 @@ Important: Keep it natural, quick, and engaging. Ask questions to keep conversat
         else:
             return conversation_manager.get_conversation_starter()
 
-# ========== PROFILE ROTATION ==========
-async def rotate_profile():
-    """Rotate name and bio weekly"""
-    while True:
-        try:
-            # Change every 3-7 days randomly
-            wait_days = random.randint(3, 7)
-            await asyncio.sleep(wait_days * 24 * 3600)
-            
-            # Select random name and bio
-            first_name, last_name = random.choice(NAME_VARIANTS)
-            bio = random.choice(BIO_VARIANTS)
-            
-            await app.update_profile(
-                first_name=first_name,
-                last_name=last_name if last_name else "",
-                bio=bio
-            )
-            
-            logger.info(f"Profile rotated to: {first_name} {last_name} - {bio}")
-            
-        except Exception as e:
-            logger.error(f"Error rotating profile: {e}")
-            await asyncio.sleep(3600)  # Wait 1 hour before retrying
-
-# ========== MESSAGE SENDING ==========
-async def send_message_with_delay(chat_id: int, text: str, user_id: int = 0, is_new_conversation: bool = False):
-    """Send message with appropriate delay"""
-    try:
-        # Get delay
-        delay = conversation_manager.get_response_delay(chat_id, is_new_conversation)
-        
-        # 40% chance for immediate response (1-5 seconds)
-        if random.random() < 0.4:
-            delay = random.uniform(1, 5)
-        
-        logger.info(f"Responding in {delay:.1f} seconds to chat {chat_id}")
-        
-        # Wait before responding
-        await asyncio.sleep(delay)
-        
-        # Send the message
-        await app.send_message(chat_id, text)
-        
-        logger.info(f"Message sent to chat {chat_id}")
-        
-    except FloodWait as e:
-        logger.warning(f"Flood wait for {e.value} seconds")
-        await asyncio.sleep(e.value + 5)
-    except Exception as e:
-        logger.error(f"Failed to send message to {chat_id}: {e}")
-
 # ========== MESSAGE HANDLERS ==========
 @app.on_message(filters.group)
 async def group_message_handler(client, message: Message):
@@ -678,6 +633,58 @@ async def private_message_handler(client, message: Message):
             send_message_with_delay(message.chat.id, response, user_id, is_new)
         )
 
+# ========== MESSAGE SENDING ==========
+async def send_message_with_delay(chat_id: int, text: str, user_id: int = 0, is_new_conversation: bool = False):
+    """Send message with appropriate delay"""
+    try:
+        # Get delay
+        delay = conversation_manager.get_response_delay(chat_id, is_new_conversation)
+        
+        # 40% chance for immediate response (1-5 seconds)
+        if random.random() < 0.4:
+            delay = random.uniform(1, 5)
+        
+        logger.info(f"Responding in {delay:.1f} seconds to chat {chat_id}")
+        
+        # Wait before responding
+        await asyncio.sleep(delay)
+        
+        # Send the message
+        await app.send_message(chat_id, text)
+        
+        logger.info(f"Message sent to chat {chat_id}")
+        
+    except FloodWait as e:
+        logger.warning(f"Flood wait for {e.value} seconds")
+        await asyncio.sleep(e.value + 5)
+    except Exception as e:
+        logger.error(f"Failed to send message to {chat_id}: {e}")
+
+# ========== PROFILE ROTATION ==========
+async def rotate_profile():
+    """Rotate name and bio weekly"""
+    while True:
+        try:
+            # Change every 3-7 days randomly
+            wait_days = random.randint(3, 7)
+            await asyncio.sleep(wait_days * 24 * 3600)
+            
+            # Select random name and bio
+            first_name, last_name = random.choice(NAME_VARIANTS)
+            bio = random.choice(BIO_VARIANTS)
+            
+            await app.update_profile(
+                first_name=first_name,
+                last_name=last_name if last_name else "",
+                bio=bio
+            )
+            
+            logger.info(f"Profile rotated to: {first_name} {last_name} - {bio}")
+            
+        except Exception as e:
+            logger.error(f"Error rotating profile: {e}")
+            await asyncio.sleep(3600)  # Wait 1 hour before retrying
+
 # ========== BACKGROUND TASKS ==========
 async def cleanup_inactive_conversations():
     """End conversations that have been inactive for too long"""
@@ -723,15 +730,6 @@ async def send_random_trending_updates():
         except Exception as e:
             logger.error(f"Error sending trending updates: {e}")
             await asyncio.sleep(300)
-
-# ========== MAIN CLIENT ==========
-app = Client(
-    "my_account",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    session_string=STRING_SESSION,
-    sleep_threshold=30
-)
 
 # ========== STARTUP ==========
 async def main():
