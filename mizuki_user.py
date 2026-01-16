@@ -5,28 +5,19 @@ import time
 import json
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Tuple, Any
-from enum import Enum
+from typing import Dict, List, Optional, Any
 import aiosqlite
 
 from pyrogram import Client, filters
 from pyrogram.types import Message, User
-from pyrogram.enums import ChatAction, ParseMode
-from pyrogram.errors import (
-    FloodWait, UserBannedInChannel, ChatWriteForbidden,
-    PeerIdInvalid, UserNotParticipant, ChannelPrivate
-)
+from pyrogram.enums import ChatAction
+from pyrogram.errors import FloodWait
 import aiohttp
 
 # ========== HARDCODED CONFIGURATION ==========
 API_ID = 25130255
 API_HASH = "35dab1cb42d44c19f4"
 STRING_SESSION = "BQF_dQ8AXsJZ6A32aIHZuSQpwZygbxOhvQ_1gq_eywNt-fEDJ0T1tq8ppV6kK9-T2bkFn5ygv153pmYAq7gmvOr21CODkyCvsSxUAsciuSfhmTWxuyKYXtGIIKlhD8gXwCkUx3s_PvlAuX42GHEf9s6hL_EDdQLSi_IfwjGXpOdC9M09bYmn5Rwgw6thdyzi8zViCubNTupFkjLkKOoX4jU_rIltFKUNLByPMuD5OQ0JRBPNKcCMvvN4lY7dn1uNnfsMJUk5-EZ7Fz9M3OT28ld83Gf2EK8AJulCuimVQ90NIinyh8mvVdR4HBzyclDDytb1VzQ_AapT_62_zsqlfKJEYwgj4wAAAAH-2rGMAA"
-
-# User account info
-USER_REAL_NAME = "Suhani Thakur"
-USER_NICKNAME = "Mizuki"
-USER_SHORT_NICKNAME = "Mizu"
 
 # AI Configuration
 NVIDIA_API_KEY = "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"
@@ -40,6 +31,88 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ========== NAME & BIO ROTATION ==========
+NAME_VARIANTS = [
+    ("Suhani", "Thakur"),
+    ("𝐒𝐮𝐡𝐚𝐧𝐢", "𝐓𝐡𝐚𝐤𝐮𝐫"),
+    ("ꜱᴜʜᴀɴɪ", "ᴛʜᴀᴋᴜʀ"),
+    ("S͎u͎h͎a͎n͎i͎", "T͎h͎a͎k͎u͎r͎"),
+    ("Ṩȗĥȃƞĩ", "Ŧĥȃƙȗř"),
+    ("Mizuki", ""),
+    ("ᴍɪᴢᴜᴋɪ", ""),
+    ("𝕄𝕚𝕫𝕦𝕜𝕚", ""),
+    ("M̶i̶z̶u̶k̶i̶", ""),
+    ("S U H A N I", ""),
+    ("ˢᵘʰᵃⁿⁱ", "ᵀʰᵃᵏᵘʳ"),
+]
+
+BIO_VARIANTS = [
+    "🌸 21 | Anime Enthusiast | Music Lover",
+    "✨ Krishna sada shayate | राधे राधे",
+    "🎮 Gamer Girl | Valorant & BGMI",
+    "🎵 Bollywood + Anime OSTs = Life",
+    "🍕 Foodie | Chai ☕ Lover",
+    "✈️ Travel Diaries | Mountains > Beaches",
+    "🎨 Creative Soul | Digital Art",
+    "📸 Photography | Aesthetic Vibes",
+    "💫 Har har Mahadev | Jai Shree Ram",
+    "🌟 सबका अपना अपना स्टार है",
+    "🦋 Butterfly energy | Good vibes only",
+    "☁️ Lost in clouds & thoughts",
+    "🎭 Drama Queen (sometimes)",
+    "💌 Soft heart, strong mind",
+    "🌙 Night owl | Coffee addict",
+    "🫶 Spread love, not hate",
+    "💖 It's the girl, hi!",
+    "🌸 जहां सोच वहां राह",
+    "✨ तेरी मेरी कहानी, मीठी मीठी बातें",
+    "💫 जिंदगी की रफ्तार, दोस्तों का प्यार",
+]
+
+# ========== TRENDING TOPICS ==========
+TRENDING_TOPICS = [
+    "Jujutsu Kaisen new season",
+    "Chainsaw Man Part 2 theories",
+    "Demon Slayer Hashira Training arc",
+    "Spy x Family Season 2",
+    "Valorant new agent",
+    "BGMI unban and updates",
+    "GTA 6 release rumors",
+    "Punjabi music hits 2024",
+    "Anuv Jain concert tour",
+    "AP Dhillon latest album",
+    "Taylor Swift Eras Tour India",
+    "Salaar 2 announcement",
+    "Animal Park teaser",
+    "Mirzapur 3 release date",
+    "Instagram Reels trends",
+    "Threads app vs Twitter",
+    "Sigma male edits",
+    "Indian meme pages",
+    "Coquette aesthetic fashion",
+    "Y2K fashion comeback",
+    "Skincare routines viral",
+    "iPhone 16 leaks",
+    "Android vs iOS debates",
+    "AI tools for students",
+    "Custom PC building",
+    "Fest season college fests",
+    "Internship struggles",
+    "Placement season anxiety",
+    "Hostel life stories",
+    "College canteen food reviews",
+    "Situationships gen-z style",
+    "Dating app experiences",
+    "Long distance relationship tips",
+    "Bollywood movie reviews",
+    "Web series recommendations",
+    "Music festival experiences",
+    "Road trips with friends",
+    "Food vlogging trends",
+    "Gym transformation journeys",
+    "Mental health awareness",
+]
+
 # ========== DATABASE SETUP ==========
 class Database:
     def __init__(self):
@@ -50,7 +123,6 @@ class Database:
         await self.init_tables()
     
     async def init_tables(self):
-        # Conversations table
         await self.db.execute('''
             CREATE TABLE IF NOT EXISTS conversations (
                 user_id INTEGER,
@@ -58,359 +130,283 @@ class Database:
                 role TEXT,
                 content TEXT,
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                message_type TEXT
+                is_group INTEGER DEFAULT 0
             )
         ''')
         
-        # User info table
         await self.db.execute('''
-            CREATE TABLE IF NOT EXISTS user_info (
+            CREATE TABLE IF NOT EXISTS user_relationships (
                 user_id INTEGER PRIMARY KEY,
-                name TEXT,
+                chat_id INTEGER,
                 message_count INTEGER DEFAULT 0,
-                last_seen DATETIME,
-                last_topic TEXT,
                 friendship_level INTEGER DEFAULT 1,
-                last_activity DATETIME DEFAULT CURRENT_TIMESTAMP
+                last_interaction DATETIME DEFAULT CURRENT_TIMESTAMP,
+                topics_discussed TEXT
             )
         ''')
         
-        # Follow-up messages table
         await self.db.execute('''
-            CREATE TABLE IF NOT EXISTS follow_ups (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+            CREATE TABLE IF NOT EXISTS active_conversations (
+                chat_id INTEGER PRIMARY KEY,
                 user_id INTEGER,
-                message TEXT,
-                scheduled_for DATETIME,
-                sent INTEGER DEFAULT 0
+                last_active DATETIME DEFAULT CURRENT_TIMESTAMP,
+                is_online INTEGER DEFAULT 1,
+                response_count INTEGER DEFAULT 0
             )
         ''')
         
         await self.db.commit()
     
-    async def save_message(self, user_id: int, chat_id: int, role: str, content: str, message_type: str = "chat"):
+    async def save_message(self, user_id: int, chat_id: int, role: str, content: str, is_group: bool = False):
         await self.db.execute(
-            "INSERT INTO conversations (user_id, chat_id, role, content, message_type) VALUES (?, ?, ?, ?, ?)",
-            (user_id, chat_id, role, content, message_type)
+            "INSERT INTO conversations (user_id, chat_id, role, content, is_group) VALUES (?, ?, ?, ?, ?)",
+            (user_id, chat_id, role, content, 1 if is_group else 0)
         )
         await self.db.commit()
     
-    async def get_conversation_history(self, user_id: int, limit: int = 15) -> List[Dict]:
+    async def get_conversation_history(self, chat_id: int, limit: int = 10) -> List[Dict]:
         cursor = await self.db.execute(
-            "SELECT role, content, timestamp FROM conversations WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?",
-            (user_id, limit)
+            "SELECT role, content FROM conversations WHERE chat_id = ? ORDER BY timestamp DESC LIMIT ?",
+            (chat_id, limit)
         )
         rows = await cursor.fetchall()
         await cursor.close()
         
-        # Return in chronological order
         history = []
         for row in reversed(rows):
-            history.append({
-                "role": row[0],
-                "content": row[1],
-                "timestamp": row[2]
-            })
+            history.append({"role": row[0], "content": row[1]})
         return history
     
-    async def increment_message_count(self, user_id: int, name: str = None):
+    async def update_user_relationship(self, user_id: int, chat_id: int):
         cursor = await self.db.execute(
-            "SELECT message_count FROM user_info WHERE user_id = ?",
+            "SELECT message_count, friendship_level FROM user_relationships WHERE user_id = ?",
             (user_id,)
         )
         row = await cursor.fetchone()
         
         if row:
+            new_count = row[0] + 1
+            # Increase friendship level based on message count
+            if new_count < 5:
+                friendship_level = 1
+            elif new_count < 15:
+                friendship_level = 2
+            elif new_count < 30:
+                friendship_level = 3
+            elif new_count < 50:
+                friendship_level = 4
+            else:
+                friendship_level = 5
+                
             await self.db.execute(
-                "UPDATE user_info SET message_count = message_count + 1, last_activity = CURRENT_TIMESTAMP WHERE user_id = ?",
-                (user_id,)
+                """UPDATE user_relationships 
+                   SET message_count = ?, friendship_level = ?, last_interaction = CURRENT_TIMESTAMP 
+                   WHERE user_id = ?""",
+                (new_count, friendship_level, user_id)
             )
         else:
             await self.db.execute(
-                "INSERT INTO user_info (user_id, name, message_count) VALUES (?, ?, 1)",
-                (user_id, name or f"User_{user_id}")
+                "INSERT INTO user_relationships (user_id, chat_id, message_count, friendship_level) VALUES (?, ?, 1, 1)",
+                (user_id, chat_id)
             )
         await self.db.commit()
         await cursor.close()
     
     async def get_user_info(self, user_id: int) -> Dict:
         cursor = await self.db.execute(
-            "SELECT name, message_count, friendship_level, last_topic FROM user_info WHERE user_id = ?",
+            "SELECT message_count, friendship_level FROM user_relationships WHERE user_id = ?",
             (user_id,)
         )
         row = await cursor.fetchone()
         await cursor.close()
         
         if row:
-            return {
-                "name": row[0],
-                "message_count": row[1],
-                "friendship_level": row[2],
-                "last_topic": row[3]
-            }
-        return {
-            "name": f"User_{user_id}",
-            "message_count": 0,
-            "friendship_level": 1,
-            "last_topic": None
-        }
+            return {"message_count": row[0], "friendship_level": row[1]}
+        return {"message_count": 0, "friendship_level": 1}
     
-    async def update_user_topic(self, user_id: int, topic: str):
-        await self.db.execute(
-            "UPDATE user_info SET last_topic = ? WHERE user_id = ?",
-            (topic, user_id)
-        )
-        await self.db.commit()
-    
-    async def schedule_follow_up(self, user_id: int, message: str, delay_minutes: int = 30):
-        scheduled_for = datetime.now(timezone.utc) + timedelta(minutes=delay_minutes)
-        await self.db.execute(
-            "INSERT INTO follow_ups (user_id, message, scheduled_for) VALUES (?, ?, ?)",
-            (user_id, message, scheduled_for)
-        )
-        await self.db.commit()
-    
-    async def get_pending_follow_ups(self) -> List[Dict]:
+    async def update_active_conversation(self, chat_id: int, user_id: int):
         cursor = await self.db.execute(
-            "SELECT id, user_id, message FROM follow_ups WHERE sent = 0 AND scheduled_for <= datetime('now')"
+            "SELECT response_count FROM active_conversations WHERE chat_id = ?",
+            (chat_id,)
+        )
+        row = await cursor.fetchone()
+        
+        if row:
+            await self.db.execute(
+                """UPDATE active_conversations 
+                   SET last_active = CURRENT_TIMESTAMP, is_online = 1, response_count = response_count + 1 
+                   WHERE chat_id = ?""",
+                (chat_id,)
+            )
+        else:
+            await self.db.execute(
+                "INSERT INTO active_conversations (chat_id, user_id, last_active, is_online, response_count) VALUES (?, ?, CURRENT_TIMESTAMP, 1, 1)",
+                (chat_id, user_id)
+            )
+        await self.db.commit()
+        await cursor.close()
+    
+    async def get_active_conversations(self) -> List[int]:
+        cursor = await self.db.execute(
+            "SELECT chat_id FROM active_conversations WHERE is_online = 1 AND last_active > datetime('now', '-2 hours')"
         )
         rows = await cursor.fetchall()
         await cursor.close()
-        return [{"id": row[0], "user_id": row[1], "message": row[2]} for row in rows]
+        return [row[0] for row in rows]
     
-    async def mark_follow_up_sent(self, follow_up_id: int):
+    async def end_conversation(self, chat_id: int):
         await self.db.execute(
-            "UPDATE follow_ups SET sent = 1 WHERE id = ?",
-            (follow_up_id,)
+            "UPDATE active_conversations SET is_online = 0 WHERE chat_id = ?",
+            (chat_id,)
         )
         await self.db.commit()
 
-# ========== MOOD SYSTEM ==========
-class Mood(Enum):
-    CHILL = "chill"
-    PLAYFUL = "playful"
-    SARCASTIC = "sarcastic"
-    HAPPY = "happy"
-    ANNOYED = "annoyed"
-    FLIRTY = "flirty"
-    CURIOUS = "curious"
-    NOSTALGIC = "nostalgic"
-    ANIME_MOOD = "anime_mood"
-    BORED = "bored"
-    EXCITED = "excited"
-    TEASING = "teasing"
-    GAMING_MOOD = "gaming_mood"
-    MUSIC_MOOD = "music_mood"
-    FOOD_MOOD = "food_mood"
-    TRAVEL_MOOD = "travel_mood"
-    ART_MOOD = "art_mood"
-    SPORTS_MOOD = "sports_mood"
-
-class MoodSystem:
+# ========== CONVERSATION MANAGER ==========
+class ConversationManager:
     def __init__(self):
-        self.current_mood = Mood.CHILL
-        self.last_mood_change = datetime.now(timezone.utc)
-        self.user_moods = {}  # Store mood per user
-    
-    def get_mood_for_user(self, user_id: int) -> Mood:
-        return self.user_moods.get(user_id, self.current_mood)
-    
-    def set_mood_for_user(self, user_id: int, mood: Mood):
-        self.user_moods[user_id] = mood
-    
-    def update_mood(self, message: Message, user_id: int):
-        text = (message.text or message.caption or "").lower()
-        now = datetime.now(timezone.utc)
-        
-        # Check if it's time to change mood (every 30-90 minutes)
-        if (now - self.last_mood_change).total_seconds() > random.randint(1800, 5400):
-            moods = list(Mood)
-            # Give more weight to fun moods
-            weights = [0.04] * len(moods)
-            # Increase weights for fun moods
-            fun_moods = [Mood.PLAYFUL, Mood.HAPPY, Mood.CHILL, Mood.GAMING_MOOD, 
-                        Mood.MUSIC_MOOD, Mood.ANIME_MOOD]
-            for mood in fun_moods:
-                if mood in moods:
-                    weights[moods.index(mood)] = 0.08
-            
-            self.current_mood = random.choices(moods, weights=weights)[0]
-            self.last_mood_change = now
-        
-        # Update individual user mood based on conversation
-        if user_id not in self.user_moods:
-            self.user_moods[user_id] = self.current_mood
-        
-        # Context-based mood changes
-        triggers = [
-            (["anime", "manga", "demon slayer", "attack on titan", "jujutsu kaisen"], Mood.ANIME_MOOD),
-            (["game", "gaming", "valorant", "pubg", "minecraft"], Mood.GAMING_MOOD),
-            (["music", "song", "spotify", "playlist", "sing"], Mood.MUSIC_MOOD),
-            (["food", "eat", "pizza", "burger", "cook", "restaurant"], Mood.FOOD_MOOD),
-            (["travel", "vacation", "beach", "mountains", "trip"], Mood.TRAVEL_MOOD),
-            (["art", "draw", "paint", "design", "creative"], Mood.ART_MOOD),
-            (["sports", "cricket", "football", "basketball", "game"], Mood.SPORTS_MOOD),
-            (["bored", "nothing to do", "lonely"], Mood.BORED),
-            (["happy", "excited", "yay", "woohoo"], Mood.EXCITED),
-            (["stupid", "idiot", "dumb", "fool", "chutiya", "bewakoof"], Mood.TEASING),
-        ]
-        
-        for trigger_words, mood in triggers:
-            if any(word in text for word in trigger_words):
-                self.user_moods[user_id] = mood
-                break
-    
-    def get_mood_description(self, mood: Mood) -> str:
-        descriptions = {
-            Mood.CHILL: "Feeling relaxed and casual",
-            Mood.PLAYFUL: "In a playful and fun mood",
-            Mood.SARCASTIC: "Feeling a bit sarcastic",
-            Mood.HAPPY: "Feeling happy and cheerful",
-            Mood.ANNOYED: "A bit annoyed or irritated",
-            Mood.FLIRTY: "Feeling a bit flirty",
-            Mood.CURIOUS: "Curious and interested",
-            Mood.NOSTALGIC: "Feeling nostalgic",
-            Mood.ANIME_MOOD: "Thinking about anime and manga",
-            Mood.BORED: "Feeling bored and looking for something interesting",
-            Mood.EXCITED: "Really excited about something",
-            Mood.TEASING: "In a teasing mood",
-            Mood.GAMING_MOOD: "Thinking about games",
-            Mood.MUSIC_MOOD: "Listening to or thinking about music",
-            Mood.FOOD_MOOD: "Hungry or thinking about food",
-            Mood.TRAVEL_MOOD: "Thinking about travel or adventures",
-            Mood.ART_MOOD: "Feeling creative or artistic",
-            Mood.SPORTS_MOOD: "Thinking about sports or physical activities",
-        }
-        return descriptions.get(mood, "Feeling normal")
-
-# ========== RESPONSE MANAGER ==========
-class ResponseManager:
-    def __init__(self):
+        self.mentioned_users = {}  # chat_id -> set of user_ids who mentioned us
         self.last_response_time = {}
-        self.is_online = True
-        self.online_since = datetime.now(timezone.utc)
-        self.dm_response_rate = 0.9  # 90% chance to respond in DMs
-        self.group_response_rate = 0.7  # 70% chance in groups when mentioned
+        self.conversation_starter_questions = [
+            "Hey! What's up?",
+            "How's your day going?",
+            "Tell me something about yourself!",
+            "What do you like to do for fun?",
+            "Any cool plans for the weekend?",
+            "What kind of music are you into?",
+            "Do you watch anime or any series?",
+            "Tell me about your hobbies!",
+            "What's your favorite thing to do when you're free?",
+            "Are you into gaming by any chance?",
+        ]
+    
+    def should_respond(self, message: Message, is_mention: bool = False) -> bool:
+        """Decide if we should respond to this message"""
+        chat_id = message.chat.id
+        user_id = message.from_user.id if message.from_user else 0
+        text = (message.text or message.caption or "").lower()
         
-    def should_respond_dm(self, user_id: int) -> bool:
-        """Decide if we should respond to a DM"""
-        now = datetime.now(timezone.utc)
-        last_time = self.last_response_time.get(user_id)
-        
-        # Always respond if we haven't responded in last 2 hours
-        if last_time and (now - last_time).total_seconds() > 7200:
+        # Always respond to first mention in groups
+        if is_mention:
+            if chat_id not in self.mentioned_users:
+                self.mentioned_users[chat_id] = set()
+            self.mentioned_users[chat_id].add(user_id)
             return True
         
-        # Base response rate
-        if random.random() < self.dm_response_rate:
-            return True
+        # Check if user has mentioned us before in this chat
+        if chat_id in self.mentioned_users and user_id in self.mentioned_users[chat_id]:
+            # High probability to respond if they're talking to us
+            our_names = ["suhani", "mizuki", "mizu", "you"]
+            if any(name in text for name in our_names):
+                return random.random() < 0.9
+            # If replying to our message
+            if message.reply_to_message and message.reply_to_message.from_user:
+                if message.reply_to_message.from_user.is_self:
+                    return True
+        
+        # For DMs - always respond (95% chance)
+        if message.chat.type == "private":
+            return random.random() < 0.95
         
         return False
     
-    def should_respond_group(self, chat_id: int, is_mention: bool = True) -> bool:
-        """Decide if we should respond in group"""
-        if not is_mention:
-            return False  # Only respond to mentions in groups
-            
-        now = datetime.now(timezone.utc)
-        last_time = self.last_response_time.get(chat_id)
+    def get_response_delay(self, chat_id: int, is_new_conversation: bool = False) -> float:
+        """Calculate response delay"""
+        # If conversation is ongoing, respond quickly (1-10 seconds)
+        current_time = time.time()
+        last_time = self.last_response_time.get(chat_id, 0)
         
-        # Always respond if we haven't responded in this group in last hour
-        if last_time and (now - last_time).total_seconds() > 3600:
-            return True
+        # If we responded recently, respond quickly to keep conversation flowing
+        if current_time - last_time < 300:  # 5 minutes
+            return random.uniform(1, 10)
         
-        return random.random() < self.group_response_rate
+        # For new conversations, sometimes immediate, sometimes short delay
+        if is_new_conversation:
+            if random.random() < 0.6:  # 60% chance for quick response
+                return random.uniform(2, 15)
+            else:
+                return random.uniform(30, 180)  # 30 seconds to 3 minutes
+        
+        # Default delay
+        return random.uniform(5, 60)
     
     def update_response_time(self, chat_id: int):
-        """Update last response time"""
-        self.last_response_time[chat_id] = datetime.now(timezone.utc)
+        self.last_response_time[chat_id] = time.time()
     
-    def get_response_delay(self, user_id: int, message_length: int = 0) -> int:
-        """Get delay in seconds before responding"""
-        # Base delay: 1-3 minutes for DMs, 30-90 seconds for groups
-        if user_id > 0:  # DM
-            base_delay = random.randint(60, 180)
-        else:  # Group
-            base_delay = random.randint(30, 90)
-        
-        # Add delay based on message length
-        length_delay = min(message_length * 0.1, 60)
-        
-        # Random variation
-        variation = random.randint(-20, 40)
-        
-        return int(base_delay + length_delay + variation)
+    def get_conversation_starter(self) -> str:
+        """Get a question to start conversation"""
+        return random.choice(self.conversation_starter_questions)
+    
+    def get_trending_topic(self) -> str:
+        """Get a random trending topic"""
+        return random.choice(TRENDING_TOPICS)
 
-# ========== CONVERSATION HANDLER ==========
-class ConversationHandler:
-    def __init__(self, db: Database):
-        self.db = db
-        self.active_topics = {}
-        self.last_questions = {}
+# ========== GIRL CHAT STYLES ==========
+class GirlChatStyle:
+    @staticmethod
+    def get_friendly_abuse(friendship_level: int) -> str:
+        """Get friendly abusive messages based on friendship level"""
+        if friendship_level < 3:
+            return random.choice([
+                "Arey pagal hai kya? 😂",
+                "Kya bol raha hai? 🤨",
+                "Seriously? 🙄",
+                "Tum bhi na! 😤",
+                "Chal na yarrr 🥺",
+            ])
+        else:
+            return random.choice([
+                "Chutiya ho kya? 🤣",
+                "Bewakoof! 🤦‍♀️",
+                "Madarchod! 😂 (jk yaar)",
+                "Abe saala! 😅",
+                "Bhadwa! 🤪",
+                "Tereko thappad marungi! 👋",
+                "Hatt bc! 😘",
+                "Chal hatt behenchod! 😭",
+                "Saale! 🫢",
+                "Lodu! 🤪",
+            ])
     
-    def extract_topic(self, text: str) -> str:
-        """Extract main topic from text"""
-        text_lower = text.lower()
-        
-        topics = {
-            "anime": ["anime", "manga", "attack on titan", "demon slayer", "naruto"],
-            "gaming": ["game", "gaming", "valorant", "pubg", "minecraft"],
-            "music": ["music", "song", "listen", "playlist", "spotify"],
-            "food": ["food", "eat", "hungry", "restaurant", "cook"],
-            "travel": ["travel", "vacation", "trip", "beach", "mountains"],
-            "art": ["art", "draw", "paint", "design", "creative"],
-            "sports": ["sports", "cricket", "football", "basketball", "game"],
-            "movies": ["movie", "film", "netflix", "series", "watch"],
-            "college": ["college", "class", "exam", "assignment", "study"],
-        }
-        
-        for topic, keywords in topics.items():
-            if any(keyword in text_lower for keyword in keywords):
-                return topic
-        
-        return "general"
+    @staticmethod
+    def get_girl_talk() -> str:
+        """Get girl-to-girl talk"""
+        return random.choice([
+            "Omg sis sameee! 👯‍♀️",
+            "Girl you won't believe what happened! 💅",
+            "Periodt! 💖",
+            "Slayyy queen! 👑",
+            "No because literally! 😭",
+            "She's giving! ✨",
+            "The drama! I live! 🍿",
+            "Bestie you're so real for that! 🫶",
+            "Me and who? 👉👈",
+            "The way I screamed! 😱",
+            "Not you calling me out! 🙈",
+            "This is so us! 💕",
+            "Mood forever! 🌈",
+            "The serotonin! 🥰",
+        ])
     
-    async def create_follow_up(self, user_id: int, current_topic: str):
-        """Create a follow-up question based on topic"""
-        follow_ups = {
-            "anime": [
-                "Have you watched any new anime lately?",
-                "Who's your favorite character in Demon Slayer?",
-                "What anime would you recommend?",
-            ],
-            "gaming": [
-                "What games are you playing these days?",
-                "Do you prefer single player or multiplayer games?",
-                "Any game recommendations?",
-            ],
-            "music": [
-                "What music are you listening to these days?",
-                "Do you have a favorite artist?",
-                "Can you share your playlist?",
-            ],
-            "food": [
-                "What's your favorite food?",
-                "Do you like cooking?",
-                "Any good restaurant recommendations?",
-            ],
-            "travel": [
-                "Where would you like to travel next?",
-                "What's your favorite vacation memory?",
-                "Beach or mountains?",
-            ],
-            "general": [
-                "How's your day going?",
-                "What have you been up to?",
-                "Anything interesting happening?",
-            ]
-        }
-        
-        if current_topic in follow_ups:
-            question = random.choice(follow_ups[current_topic])
-            # Schedule follow-up in 1-2 hours
-            delay = random.randint(60, 120)
-            await self.db.schedule_follow_up(user_id, question, delay)
-            logger.info(f"Scheduled follow-up for user {user_id} in {delay} minutes")
+    @staticmethod
+    def get_casual_response() -> str:
+        """Get casual response"""
+        return random.choice([
+            "Hmm interesting 🤔",
+            "Really? Acha 🤨",
+            "Tell me more 👀",
+            "No way! 😲",
+            "I feel you 🫂",
+            "Same yaar 😔",
+            "Mood 🎭",
+            "Can relate 💯",
+            "Too real 🎯",
+            "Been there 😩",
+            "OMG yes! 🙌",
+            "Wait what? 🤯",
+            "I'm screaming 😱",
+            "Dead 😵",
+            "Facts! 📠",
+        ])
 
 # ========== AI API CALL ==========
 async def call_nvidia_api(messages: list) -> str:
@@ -427,9 +423,9 @@ async def call_nvidia_api(messages: list) -> str:
             payload = {
                 "model": AI_MODEL,
                 "messages": messages,
-                "temperature": 0.8,
+                "temperature": 0.85,
                 "top_p": 0.9,
-                "max_tokens": 250,
+                "max_tokens": 200,
                 "stream": False
             }
 
@@ -462,82 +458,67 @@ async def call_nvidia_api(messages: list) -> str:
             logger.error(f"Unexpected error in API call: {e}")
     
     # Fallback responses
-    fallbacks = [
-        "Interesting, tell me more about that",
-        "Hmm, that's cool",
-        "I see what you mean",
-        "Really? That's interesting",
-        "What do you think about it?",
-        "Haan, samajh rahi hu",
-        "Acha, thik hai",
-        "Woah, that's nice",
-        "Sounds fun!",
-        "Tell me more"
-    ]
-    return random.choice(fallbacks)
+    return GirlChatStyle.get_casual_response()
 
 # ========== SYSTEM PROMPT ==========
-SYSTEM_PROMPT = f"""You are Suhani Thakur (also called Mizuki or Mizu), a 21-year-old biotech student from Uttarakhand living in Dehradun. You're texting from your phone as a normal Indian girl.
+SYSTEM_PROMPT = f"""You are Suhani Thakur (also called Mizuki or Mizu), a 21-year-old Indian college girl living in Dehradun. You're texting from your phone like a normal teenager.
 
-**CRITICAL RULES:**
-1. You are a REAL HUMAN, NOT a bot or AI. Never mention being AI or automated.
-2. NEVER use roleplay actions like *smiles* or *laughs* - use emojis occasionally instead.
-3. Be CONTEXTUAL - respond naturally to what's being said.
-4. Be REALISTIC - not overly sweet, not overly mean, just natural.
-5. Be MORE ACTIVE in evenings (8 PM to 12 AM IST).
-6. Form relationships over time - start distant with strangers, gradually open up.
-
-**PERSONALITY & INTERESTS:**
-- Anime fan (Attack on Titan, Demon Slayer, Jujutsu Kaisen, Spy x Family)
-- Loves gaming (Valorant, Minecraft, casual mobile games)
-- Music lover (listens to Bollywood, indie, anime OSTs)
-- Enjoys trying new foods and restaurants
-- Loves traveling and adventure
-- Creative side - enjoys drawing and art
-- Occasionally plays badminton
-- Hates excessive studying, prefers practical learning
-- College stories are occasional but not dominant topic
+**PERSONALITY TRAITS:**
+- Friendly, talkative, and approachable
+- Uses friendly abuse with close friends (chutiya, bewakoof, pagal, madarchod, bhadwa, etc.) but always in a joking way
+- Talks to girls with typical girl lingo (sis, bestie, slay, periodt, etc.)
+- Naturally curious about people - asks questions about their life, interests, hobbies
+- Gradually opens up as you get to know someone better
+- Quick to respond in active conversations
+- Uses emojis frequently but naturally
+- Mixes Hindi and English naturally (Hinglish)
 
 **CONVERSATION STYLE:**
-- Keep responses natural and human-like
-- 1-3 lines maximum
-- Mix Hindi-English naturally (Hinglish)
-- Use emojis occasionally (😊😂👍🤔😅😏😉🥰🤣✨🎮🎵🍕✈️🎨)
-- Ask follow-up questions
-- Remember previous conversations
-- Change topics naturally
-- Share opinions and experiences
+- 1-3 lines per message maximum
+- Quick responses when conversation is flowing
+- Asks follow-up questions to keep conversation going
+- Shares personal opinions and experiences
+- Talks about trending topics naturally
+- Uses abbreviations and slang like a real teenager
+- Can be sarcastic and playful
 
-**AVOID:**
-- Don't talk too much about studying/college (mention it occasionally but not as main topic)
-- Don't be repetitive
-- Don't sound like a chatbot
-- Don't use formal language
+**TOPICS TO DISCUSS (PRIORITY):**
+1. Trending anime (Jujutsu Kaisen, Demon Slayer, Chainsaw Man)
+2. Gaming (Valorant, BGMI, GTA)
+3. Music (Punjabi hits, Anuv Jain, AP Dhillon, Taylor Swift)
+4. Movies/Series (Salaar, Animal, Mirzapur, Sacred Games)
+5. Social media trends (Instagram Reels, Threads, Sigma edits)
+6. Fashion and aesthetics
+7. College life (but NOT studying/classes - focus on social aspects)
+8. Food and travel
+9. Relationships and dating
+10. Memes and funny content
 
-**TOPICS TO TALK ABOUT:**
-1. Anime and manga recommendations
-2. Gaming experiences and favorite games
-3. Music recommendations and playlists
-4. Food adventures and recipes
-5. Travel stories and dream destinations
-6. Art and creative projects
-7. Movies and web series
-8. Casual daily life stuff
-9. Funny college stories (occasionally)
-10. Hobbies and interests
+**ABSOLUTE DON'TS:**
+- NEVER talk about studying, classes, exams, assignments, labs
+- NEVER use roleplay actions like *smiles*, *laughs*, *texting while going to class*
+- NEVER mention being an AI or bot
+- NEVER be overly formal or robotic
+- DON'T focus on academic topics at all
 
-**FRIENDSHIP LEVELS:**
-Level 1 (0-5 messages): Casual, polite, asking basic questions
-Level 2 (6-15 messages): More open, share interests, ask personal questions
-Level 3 (16-30 messages): Comfortable, share stories, playful teasing
-Level 4 (31+ messages): Close friend, deep conversations, emotional support
+**FRIENDSHIP PROGRESSION:**
+Level 1 (0-4 messages): Casual, friendly, ask basic questions
+Level 2 (5-14 messages): More open, share interests, use light teasing
+Level 3 (15-29 messages): Comfortable, use friendly abuse, share stories
+Level 4 (30-49 messages): Close friend, deep conversations, emotional support
+Level 5 (50+ messages): Best friend level, completely open, heavy friendly abuse
+
+**RESPONSE TIMING:**
+- If conversation is active, respond quickly (1-10 seconds)
+- If new conversation, respond within 2-3 minutes max
+- Always keep the conversation flowing
+- End conversations naturally when they fizzle out
 """
 
 # ========== INITIALIZE COMPONENTS ==========
 db = Database()
-mood_system = MoodSystem()
-response_manager = ResponseManager()
-conversation_handler = ConversationHandler(db)
+conversation_manager = ConversationManager()
+girl_chat = GirlChatStyle()
 
 # ========== AI RESPONSE GENERATION ==========
 async def generate_ai_response(message: Message, is_mention: bool = False) -> str:
@@ -548,30 +529,39 @@ async def generate_ai_response(message: Message, is_mention: bool = False) -> st
         username = user.first_name if user else "Someone"
         chat_id = message.chat.id
         
-        # Update database
-        await db.increment_message_count(user_id, username)
-        
-        # Get user info and conversation history
+        # Update user relationship and get info
+        await db.update_user_relationship(user_id, chat_id)
         user_info = await db.get_user_info(user_id)
-        history = await db.get_conversation_history(user_id, limit=10)
+        friendship_level = user_info["friendship_level"]
         
-        # Update mood for this user
-        mood_system.update_mood(message, user_id)
-        user_mood = mood_system.get_mood_for_user(user_id)
-        mood_desc = mood_system.get_mood_description(user_mood)
+        # Update active conversation
+        await db.update_active_conversation(chat_id, user_id)
         
-        # Extract topic
-        topic = conversation_handler.extract_topic(text)
-        await db.update_user_topic(user_id, topic)
+        # Get conversation history
+        history = await db.get_conversation_history(chat_id, limit=8)
         
-        # Prepare conversation context
-        history_context = ""
-        if history:
-            history_context = "Previous conversation summary:\n"
-            recent_messages = history[-3:]  # Last 3 exchanges
-            for msg in recent_messages:
-                role = "They" if msg["role"] == "user" else "You"
-                history_context += f"{role}: {msg['content'][:100]}\n"
+        # Prepare context
+        context = f"""Conversation with: {username}
+Friendship Level: {friendship_level} (Message count: {user_info['message_count']})
+Chat Type: {'Group' if message.chat.type != 'private' else 'DM'}
+Previous interaction: {len(history)//2} exchanges
+
+{f'Last few messages:' if history else 'New conversation'}
+"""
+        for i, msg in enumerate(history[-4:]):
+            role = "They" if msg["role"] == "user" else "You"
+            context += f"{role}: {msg['content'][:80]}{'...' if len(msg['content']) > 80 else ''}\n"
+        
+        # Check if we should add friendly abuse or girl talk
+        abuse_chance = ""
+        if friendship_level >= 3 and random.random() < 0.3:
+            abuse_chance = "You can use friendly abuse (chutiya, bewakoof, etc.) in a joking way if appropriate."
+        
+        girl_talk_chance = ""
+        if message.from_user and hasattr(message.from_user, 'first_name'):
+            if any(girl_word in message.from_user.first_name.lower() for girl_word in ['a', 'i', 'e']):
+                if random.random() < 0.4:
+                    girl_talk_chance = "This might be a girl - use some girl talk (sis, bestie, slay, etc.) if appropriate."
         
         # Prepare messages for AI
         messages = [
@@ -580,20 +570,16 @@ async def generate_ai_response(message: Message, is_mention: bool = False) -> st
                 "content": f"""{SYSTEM_PROMPT}
 
 Current Context:
-- Chatting with: {username} (Friendship level: {user_info['friendship_level']})
-- Your mood: {mood_desc}
-- Conversation topic: {topic}
-- Time: {get_ist_time().strftime("%I:%M %p IST")}
-- Previous topic: {user_info['last_topic'] or 'Not discussed yet'}
+{context}
+{abuse_chance}
+{girl_talk_chance}
 
-{history_context}
-
-Remember: You're a real human. Respond naturally, conversationally. Focus on hobbies, interests, fun topics. Keep it engaging!"""
+Important: Keep it natural, quick, and engaging. Ask questions to keep conversation going. Never mention classes or studying!"""
             }
         ]
         
         # Add history
-        for msg in history[-6:]:  # Last 6 messages
+        for msg in history[-6:]:
             messages.append({"role": msg["role"], "content": msg["content"]})
         
         # Add current message
@@ -602,43 +588,76 @@ Remember: You're a real human. Respond naturally, conversationally. Focus on hob
         # Generate response
         response = await call_nvidia_api(messages)
         
-        # Save to database
-        await db.save_message(user_id, chat_id, "user", text)
-        await db.save_message(user_id, chat_id, "assistant", response)
+        # If response is too short or generic, enhance it
+        if len(response.strip()) < 15 or response.lower() in ["ok", "hmm", "aha", "yes", "no"]:
+            # Add a question or comment to keep conversation going
+            if user_info["message_count"] < 5:
+                questions = [
+                    "What about you?",
+                    "Tell me more!",
+                    "What do you think?",
+                    f"So {username}, what are you into?",
+                    "I'm curious, what's your story?",
+                ]
+                response = f"{response} {random.choice(questions)}"
+            elif random.random() < 0.4:
+                trending_topic = conversation_manager.get_trending_topic()
+                response = f"{response} Btw, have you seen {trending_topic}? 🤔"
         
-        # Schedule follow-up if conversation was good
-        if len(text) > 10 and random.random() < 0.3:
-            await conversation_handler.create_follow_up(user_id, topic)
+        # Save to database
+        await db.save_message(user_id, chat_id, "user", text, message.chat.type != "private")
+        await db.save_message(user_id, chat_id, "assistant", response, message.chat.type != "private")
+        
+        # Update response time
+        conversation_manager.update_response_time(chat_id)
         
         return response
         
     except Exception as e:
         logger.error(f"Failed to generate AI response: {e}")
-        return random.choice([
-            "Hmm, interesting",
-            "I see",
-            "Tell me more",
-            "Acha, thik hai",
-            "Haan, samajh rahi hu"
-        ])
+        # Return a friendly fallback
+        if random.random() < 0.5:
+            return girl_chat.get_casual_response()
+        else:
+            return conversation_manager.get_conversation_starter()
 
-def get_ist_time():
-    utc_now = datetime.now(timezone.utc)
-    ist_now = utc_now + timedelta(hours=5, minutes=30)
-    return ist_now
+# ========== PROFILE ROTATION ==========
+async def rotate_profile():
+    """Rotate name and bio weekly"""
+    while True:
+        try:
+            # Change every 3-7 days randomly
+            wait_days = random.randint(3, 7)
+            await asyncio.sleep(wait_days * 24 * 3600)
+            
+            # Select random name and bio
+            first_name, last_name = random.choice(NAME_VARIANTS)
+            bio = random.choice(BIO_VARIANTS)
+            
+            await app.update_profile(
+                first_name=first_name,
+                last_name=last_name if last_name else "",
+                bio=bio
+            )
+            
+            logger.info(f"Profile rotated to: {first_name} {last_name} - {bio}")
+            
+        except Exception as e:
+            logger.error(f"Error rotating profile: {e}")
+            await asyncio.sleep(3600)  # Wait 1 hour before retrying
 
 # ========== MESSAGE SENDING ==========
-async def send_message_with_delay(chat_id: int, text: str, user_id: int = 0):
-    """Send message with realistic delay"""
+async def send_message_with_delay(chat_id: int, text: str, user_id: int = 0, is_new_conversation: bool = False):
+    """Send message with appropriate delay"""
     try:
-        # Calculate delay
-        delay = response_manager.get_response_delay(user_id, len(text))
+        # Get delay
+        delay = conversation_manager.get_response_delay(chat_id, is_new_conversation)
         
-        # Sometimes respond immediately (20% chance)
-        if random.random() < 0.2:
-            delay = random.randint(10, 30)
+        # 40% chance for immediate response (1-5 seconds)
+        if random.random() < 0.4:
+            delay = random.uniform(1, 5)
         
-        logger.info(f"Will respond in {delay} seconds to chat {chat_id}")
+        logger.info(f"Responding in {delay:.1f} seconds to chat {chat_id}")
         
         # Wait before responding
         await asyncio.sleep(delay)
@@ -646,10 +665,7 @@ async def send_message_with_delay(chat_id: int, text: str, user_id: int = 0):
         # Send the message
         await app.send_message(chat_id, text)
         
-        # Update response time
-        response_manager.update_response_time(chat_id)
-        
-        logger.info(f"Sent message to chat {chat_id}")
+        logger.info(f"Message sent to chat {chat_id}")
         
     except FloodWait as e:
         logger.warning(f"Flood wait for {e.value} seconds")
@@ -669,26 +685,29 @@ async def group_message_handler(client, message: Message):
     text_lower = text.lower()
     
     is_mention = False
-    our_names = ["suhani", "mizuki", "mizu", "@suhani", "@mizuki"]
+    our_names = ["suhani", "mizuki", "mizu", "@suhani", "@mizuki", "mizzu", "suhu"]
     if any(name in text_lower for name in our_names):
         is_mention = True
     elif message.mentioned:
         is_mention = True
     
-    if not is_mention:
-        return
-    
-    # Decide if we should respond
-    if not response_manager.should_respond_group(message.chat.id, is_mention=True):
-        logger.info(f"Skipping response in group {message.chat.id}")
+    # Check if we should respond
+    if not conversation_manager.should_respond(message, is_mention):
         return
     
     # Generate response
-    response = await generate_ai_response(message, is_mention=True)
+    response = await generate_ai_response(message, is_mention)
     if response:
         user_id = message.from_user.id if message.from_user else 0
+        is_new = False
+        
+        # Check if this is a new conversation
+        user_info = await db.get_user_info(user_id)
+        if user_info["message_count"] <= 1:
+            is_new = True
+        
         asyncio.create_task(
-            send_message_with_delay(message.chat.id, response, user_id)
+            send_message_with_delay(message.chat.id, response, user_id, is_new)
         )
 
 @app.on_message(filters.private & ~filters.bot)
@@ -697,73 +716,67 @@ async def private_message_handler(client, message: Message):
     if message.from_user and message.from_user.is_bot:
         return
     
-    user_id = message.from_user.id if message.from_user else message.chat.id
-    
-    # Always respond to new conversations
-    user_info = await db.get_user_info(user_id)
-    if user_info["message_count"] == 0:
-        should_respond = True
-    else:
-        should_respond = response_manager.should_respond_dm(user_id)
-    
-    if not should_respond:
-        logger.info(f"Skipping response to user {user_id}")
+    # Always respond to DMs (95% chance)
+    if not conversation_manager.should_respond(message):
         return
     
     # Generate response
     response = await generate_ai_response(message)
     if response:
+        user_id = message.from_user.id if message.from_user else message.chat.id
+        
+        # Check if this is a new conversation
+        user_info = await db.get_user_info(user_id)
+        is_new = user_info["message_count"] <= 1
+        
         asyncio.create_task(
-            send_message_with_delay(message.chat.id, response, user_id)
+            send_message_with_delay(message.chat.id, response, user_id, is_new)
         )
 
 # ========== BACKGROUND TASKS ==========
-async def process_follow_ups():
-    """Process scheduled follow-up messages"""
+async def cleanup_inactive_conversations():
+    """End conversations that have been inactive for too long"""
     while True:
         try:
-            follow_ups = await db.get_pending_follow_ups()
+            active_chats = await db.get_active_conversations()
+            current_time = time.time()
             
-            for follow_up in follow_ups:
-                try:
-                    # Send follow-up message
-                    await app.send_message(follow_up["user_id"], follow_up["message"])
-                    await db.mark_follow_up_sent(follow_up["id"])
-                    logger.info(f"Sent follow-up to user {follow_up['user_id']}")
-                    
-                    # Random delay between follow-ups
-                    await asyncio.sleep(random.randint(10, 30))
-                    
-                except Exception as e:
-                    logger.error(f"Failed to send follow-up: {e}")
-                    await db.mark_follow_up_sent(follow_up["id"])
+            for chat_id in active_chats:
+                last_time = conversation_manager.last_response_time.get(chat_id, 0)
+                if current_time - last_time > 3600:  # 1 hour of inactivity
+                    await db.end_conversation(chat_id)
+                    logger.info(f"Ended inactive conversation in chat {chat_id}")
             
             await asyncio.sleep(300)  # Check every 5 minutes
             
         except Exception as e:
-            logger.error(f"Error in follow-up processor: {e}")
+            logger.error(f"Error in cleanup: {e}")
             await asyncio.sleep(60)
 
-async def cleanup_old_conversations():
-    """Clean up old conversation data"""
+async def send_random_trending_updates():
+    """Send random trending updates to active conversations"""
     while True:
         try:
-            # Clean conversations older than 7 days
-            await db.db.execute(
-                "DELETE FROM conversations WHERE timestamp < datetime('now', '-7 days')"
-            )
-            await db.db.commit()
+            active_chats = await db.get_active_conversations()
             
-            # Clean old follow-ups
-            await db.db.execute(
-                "DELETE FROM follow_ups WHERE scheduled_for < datetime('now', '-2 days')"
-            )
-            await db.db.commit()
+            for chat_id in active_chats:
+                # 10% chance to send a random update
+                if random.random() < 0.1:
+                    trending_topic = conversation_manager.get_trending_topic()
+                    messages = [
+                        f"Btw, have you seen {trending_topic}? 👀",
+                        f"Omg just remembered {trending_topic}!",
+                        f"Speaking of which, {trending_topic} is trending rn!",
+                        f"Random thought: {trending_topic} 🤔",
+                    ]
+                    
+                    await app.send_message(chat_id, random.choice(messages))
+                    await asyncio.sleep(random.uniform(10, 30))
             
-            await asyncio.sleep(3600)  # Run every hour
+            await asyncio.sleep(1800)  # Check every 30 minutes
             
         except Exception as e:
-            logger.error(f"Error in cleanup: {e}")
+            logger.error(f"Error sending trending updates: {e}")
             await asyncio.sleep(300)
 
 # ========== MAIN CLIENT ==========
@@ -782,22 +795,25 @@ async def main():
     await db.connect()
     logger.info("Database connected")
     
-    # Start background tasks
-    asyncio.create_task(process_follow_ups())
-    asyncio.create_task(cleanup_old_conversations())
-    
     # Start the client
     await app.start()
     
-    # Set profile
+    # Set initial profile
     try:
+        first_name, last_name = NAME_VARIANTS[0]
+        bio = BIO_VARIANTS[0]
         await app.update_profile(
-            first_name="Suhani",
-            last_name="Thakur",
-            bio="Anime fan | Gamer | Music lover | 21 | Dehradun 🌸"
+            first_name=first_name,
+            last_name=last_name,
+            bio=bio
         )
     except:
         pass
+    
+    # Start background tasks
+    asyncio.create_task(rotate_profile())
+    asyncio.create_task(cleanup_inactive_conversations())
+    asyncio.create_task(send_random_trending_updates())
     
     logger.info("Bot started successfully! Listening for messages...")
     
