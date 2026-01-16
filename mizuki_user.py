@@ -6,7 +6,8 @@ import json
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any
-import aiosqlite
+import sqlite3
+import threading
 
 from pyrogram import Client, filters
 from pyrogram.types import Message, User
@@ -113,153 +114,97 @@ TRENDING_TOPICS = [
     "Mental health awareness",
 ]
 
-# ========== DATABASE SETUP ==========
-class Database:
+# ========== SIMPLE DATABASE USING DICTIONARIES ==========
+class SimpleDatabase:
     def __init__(self):
-        self.db = None
-    
-    async def connect(self):
-        self.db = await aiosqlite.connect('chat_bot.db')
-        await self.init_tables()
-    
-    async def init_tables(self):
-        await self.db.execute('''
-            CREATE TABLE IF NOT EXISTS conversations (
-                user_id INTEGER,
-                chat_id INTEGER,
-                role TEXT,
-                content TEXT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                is_group INTEGER DEFAULT 0
-            )
-        ''')
+        self.conversations = {}
+        self.user_relationships = {}
+        self.active_conversations = {}
         
-        await self.db.execute('''
-            CREATE TABLE IF NOT EXISTS user_relationships (
-                user_id INTEGER PRIMARY KEY,
-                chat_id INTEGER,
-                message_count INTEGER DEFAULT 0,
-                friendship_level INTEGER DEFAULT 1,
-                last_interaction DATETIME DEFAULT CURRENT_TIMESTAMP,
-                topics_discussed TEXT
-            )
-        ''')
+    def save_message(self, user_id: int, chat_id: int, role: str, content: str, is_group: bool = False):
+        if chat_id not in self.conversations:
+            self.conversations[chat_id] = []
         
-        await self.db.execute('''
-            CREATE TABLE IF NOT EXISTS active_conversations (
-                chat_id INTEGER PRIMARY KEY,
-                user_id INTEGER,
-                last_active DATETIME DEFAULT CURRENT_TIMESTAMP,
-                is_online INTEGER DEFAULT 1,
-                response_count INTEGER DEFAULT 0
-            )
-        ''')
+        self.conversations[chat_id].append({
+            "user_id": user_id,
+            "role": role,
+            "content": content,
+            "timestamp": datetime.now(timezone.utc),
+            "is_group": is_group
+        })
         
-        await self.db.commit()
+        # Keep only last 50 messages per chat
+        if len(self.conversations[chat_id]) > 50:
+            self.conversations[chat_id] = self.conversations[chat_id][-50:]
     
-    async def save_message(self, user_id: int, chat_id: int, role: str, content: str, is_group: bool = False):
-        await self.db.execute(
-            "INSERT INTO conversations (user_id, chat_id, role, content, is_group) VALUES (?, ?, ?, ?, ?)",
-            (user_id, chat_id, role, content, 1 if is_group else 0)
-        )
-        await self.db.commit()
-    
-    async def get_conversation_history(self, chat_id: int, limit: int = 10) -> List[Dict]:
-        cursor = await self.db.execute(
-            "SELECT role, content FROM conversations WHERE chat_id = ? ORDER BY timestamp DESC LIMIT ?",
-            (chat_id, limit)
-        )
-        rows = await cursor.fetchall()
-        await cursor.close()
+    def get_conversation_history(self, chat_id: int, limit: int = 10) -> List[Dict]:
+        if chat_id not in self.conversations:
+            return []
         
-        history = []
-        for row in reversed(rows):
-            history.append({"role": row[0], "content": row[1]})
-        return history
+        return [
+            {"role": msg["role"], "content": msg["content"]}
+            for msg in self.conversations[chat_id][-limit:]
+        ]
     
-    async def update_user_relationship(self, user_id: int, chat_id: int):
-        cursor = await self.db.execute(
-            "SELECT message_count, friendship_level FROM user_relationships WHERE user_id = ?",
-            (user_id,)
-        )
-        row = await cursor.fetchone()
+    def update_user_relationship(self, user_id: int, chat_id: int):
+        if user_id not in self.user_relationships:
+            self.user_relationships[user_id] = {
+                "chat_id": chat_id,
+                "message_count": 0,
+                "friendship_level": 1,
+                "last_interaction": datetime.now(timezone.utc)
+            }
         
-        if row:
-            new_count = row[0] + 1
-            # Increase friendship level based on message count
-            if new_count < 5:
-                friendship_level = 1
-            elif new_count < 15:
-                friendship_level = 2
-            elif new_count < 30:
-                friendship_level = 3
-            elif new_count < 50:
-                friendship_level = 4
-            else:
-                friendship_level = 5
-                
-            await self.db.execute(
-                """UPDATE user_relationships 
-                   SET message_count = ?, friendship_level = ?, last_interaction = CURRENT_TIMESTAMP 
-                   WHERE user_id = ?""",
-                (new_count, friendship_level, user_id)
-            )
+        self.user_relationships[user_id]["message_count"] += 1
+        self.user_relationships[user_id]["last_interaction"] = datetime.now(timezone.utc)
+        
+        # Update friendship level
+        count = self.user_relationships[user_id]["message_count"]
+        if count < 5:
+            level = 1
+        elif count < 15:
+            level = 2
+        elif count < 30:
+            level = 3
+        elif count < 50:
+            level = 4
         else:
-            await self.db.execute(
-                "INSERT INTO user_relationships (user_id, chat_id, message_count, friendship_level) VALUES (?, ?, 1, 1)",
-                (user_id, chat_id)
-            )
-        await self.db.commit()
-        await cursor.close()
-    
-    async def get_user_info(self, user_id: int) -> Dict:
-        cursor = await self.db.execute(
-            "SELECT message_count, friendship_level FROM user_relationships WHERE user_id = ?",
-            (user_id,)
-        )
-        row = await cursor.fetchone()
-        await cursor.close()
+            level = 5
         
-        if row:
-            return {"message_count": row[0], "friendship_level": row[1]}
+        self.user_relationships[user_id]["friendship_level"] = level
+    
+    def get_user_info(self, user_id: int) -> Dict:
+        if user_id in self.user_relationships:
+            info = self.user_relationships[user_id]
+            return {
+                "message_count": info["message_count"],
+                "friendship_level": info["friendship_level"]
+            }
         return {"message_count": 0, "friendship_level": 1}
     
-    async def update_active_conversation(self, chat_id: int, user_id: int):
-        cursor = await self.db.execute(
-            "SELECT response_count FROM active_conversations WHERE chat_id = ?",
-            (chat_id,)
-        )
-        row = await cursor.fetchone()
+    def update_active_conversation(self, chat_id: int, user_id: int):
+        self.active_conversations[chat_id] = {
+            "user_id": user_id,
+            "last_active": datetime.now(timezone.utc),
+            "is_online": True,
+            "response_count": self.active_conversations.get(chat_id, {}).get("response_count", 0) + 1
+        }
+    
+    def get_active_conversations(self) -> List[int]:
+        now = datetime.now(timezone.utc)
+        active = []
         
-        if row:
-            await self.db.execute(
-                """UPDATE active_conversations 
-                   SET last_active = CURRENT_TIMESTAMP, is_online = 1, response_count = response_count + 1 
-                   WHERE chat_id = ?""",
-                (chat_id,)
-            )
-        else:
-            await self.db.execute(
-                "INSERT INTO active_conversations (chat_id, user_id, last_active, is_online, response_count) VALUES (?, ?, CURRENT_TIMESTAMP, 1, 1)",
-                (chat_id, user_id)
-            )
-        await self.db.commit()
-        await cursor.close()
+        for chat_id, info in self.active_conversations.items():
+            if info.get("is_online", False):
+                last_active = info.get("last_active")
+                if last_active and (now - last_active).total_seconds() < 7200:  # 2 hours
+                    active.append(chat_id)
+        
+        return active
     
-    async def get_active_conversations(self) -> List[int]:
-        cursor = await self.db.execute(
-            "SELECT chat_id FROM active_conversations WHERE is_online = 1 AND last_active > datetime('now', '-2 hours')"
-        )
-        rows = await cursor.fetchall()
-        await cursor.close()
-        return [row[0] for row in rows]
-    
-    async def end_conversation(self, chat_id: int):
-        await self.db.execute(
-            "UPDATE active_conversations SET is_online = 0 WHERE chat_id = ?",
-            (chat_id,)
-        )
-        await self.db.commit()
+    def end_conversation(self, chat_id: int):
+        if chat_id in self.active_conversations:
+            self.active_conversations[chat_id]["is_online"] = False
 
 # ========== CONVERSATION MANAGER ==========
 class ConversationManager:
@@ -516,7 +461,7 @@ Level 5 (50+ messages): Best friend level, completely open, heavy friendly abuse
 """
 
 # ========== INITIALIZE COMPONENTS ==========
-db = Database()
+db = SimpleDatabase()
 conversation_manager = ConversationManager()
 girl_chat = GirlChatStyle()
 
@@ -530,15 +475,15 @@ async def generate_ai_response(message: Message, is_mention: bool = False) -> st
         chat_id = message.chat.id
         
         # Update user relationship and get info
-        await db.update_user_relationship(user_id, chat_id)
-        user_info = await db.get_user_info(user_id)
+        db.update_user_relationship(user_id, chat_id)
+        user_info = db.get_user_info(user_id)
         friendship_level = user_info["friendship_level"]
         
         # Update active conversation
-        await db.update_active_conversation(chat_id, user_id)
+        db.update_active_conversation(chat_id, user_id)
         
         # Get conversation history
-        history = await db.get_conversation_history(chat_id, limit=8)
+        history = db.get_conversation_history(chat_id, limit=8)
         
         # Prepare context
         context = f"""Conversation with: {username}
@@ -605,8 +550,8 @@ Important: Keep it natural, quick, and engaging. Ask questions to keep conversat
                 response = f"{response} Btw, have you seen {trending_topic}? 🤔"
         
         # Save to database
-        await db.save_message(user_id, chat_id, "user", text, message.chat.type != "private")
-        await db.save_message(user_id, chat_id, "assistant", response, message.chat.type != "private")
+        db.save_message(user_id, chat_id, "user", text, message.chat.type != "private")
+        db.save_message(user_id, chat_id, "assistant", response, message.chat.type != "private")
         
         # Update response time
         conversation_manager.update_response_time(chat_id)
@@ -702,7 +647,7 @@ async def group_message_handler(client, message: Message):
         is_new = False
         
         # Check if this is a new conversation
-        user_info = await db.get_user_info(user_id)
+        user_info = db.get_user_info(user_id)
         if user_info["message_count"] <= 1:
             is_new = True
         
@@ -726,7 +671,7 @@ async def private_message_handler(client, message: Message):
         user_id = message.from_user.id if message.from_user else message.chat.id
         
         # Check if this is a new conversation
-        user_info = await db.get_user_info(user_id)
+        user_info = db.get_user_info(user_id)
         is_new = user_info["message_count"] <= 1
         
         asyncio.create_task(
@@ -738,13 +683,13 @@ async def cleanup_inactive_conversations():
     """End conversations that have been inactive for too long"""
     while True:
         try:
-            active_chats = await db.get_active_conversations()
+            active_chats = db.get_active_conversations()
             current_time = time.time()
             
             for chat_id in active_chats:
                 last_time = conversation_manager.last_response_time.get(chat_id, 0)
                 if current_time - last_time > 3600:  # 1 hour of inactivity
-                    await db.end_conversation(chat_id)
+                    db.end_conversation(chat_id)
                     logger.info(f"Ended inactive conversation in chat {chat_id}")
             
             await asyncio.sleep(300)  # Check every 5 minutes
@@ -757,7 +702,7 @@ async def send_random_trending_updates():
     """Send random trending updates to active conversations"""
     while True:
         try:
-            active_chats = await db.get_active_conversations()
+            active_chats = db.get_active_conversations()
             
             for chat_id in active_chats:
                 # 10% chance to send a random update
@@ -791,10 +736,6 @@ app = Client(
 # ========== STARTUP ==========
 async def main():
     """Main entry point"""
-    # Connect to database
-    await db.connect()
-    logger.info("Database connected")
-    
     # Start the client
     await app.start()
     
